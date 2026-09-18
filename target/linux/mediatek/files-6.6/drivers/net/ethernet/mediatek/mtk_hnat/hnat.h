@@ -960,6 +960,14 @@ struct mtk_hnat {
 
 	u32 foe_etry_num;
 	u32 etry_num_cfg;
+	/* debugfs tunables, re-applied by hnat_hw_init() after a SER */
+	u16 bind_threshold;
+	u16 tcp_dlta;
+	u16 udp_dlta;
+	u16 fin_dlta;
+	u8 tcp_ka;
+	u8 udp_ka;
+	u8 bind_rate;
 	struct net_device *g_ppdev;
 	struct net_device *g_wandev;
 	struct net_device *wifi_hook_if[MAX_IF_NUM];
