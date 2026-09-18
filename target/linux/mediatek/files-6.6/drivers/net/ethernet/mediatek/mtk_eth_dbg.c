@@ -25,6 +25,7 @@
 #include <linux/debugfs.h>
 #include <linux/of_mdio.h>
 #include <linux/of_address.h>
+#include <net/dsa.h>
 
 
 #include "mtk_eth_soc.h"
@@ -66,14 +67,60 @@ struct mtk_eth_debug eth_debug;
 static int qdma_pppq_show(struct seq_file *m, void *v)
 {
 	struct mtk_eth *eth = m->private;
+	struct net_device *pppq_map[MTK_QDMA_NUM_QUEUES] = { NULL };
+	struct net_device *ndev;
+	struct mtk_mac *mac;
 	int i;
 
+	mtk_eth_set_dsa_pppq_offset(eth);
+
+	/* Find the netdevices for the corresponding QDMA queues */
+	for (i = 0; i < MTK_MAX_DEVS; i++) {
+		ndev = eth->netdev[i];
+		if (!ndev)
+			continue;
+
+		/* queue[i] is used by ethernet devices with GMAC index i */
+		if (i < MTK_QDMA_NUM_QUEUES)
+			pppq_map[i] = ndev;
+
+		/* Populate per-port queue owners for DSA-user ports */
+		if (netdev_uses_dsa(ndev)) {
+			const struct dsa_port *dp;
+			struct dsa_switch *ds;
+			u32 pppq_ofs = eth->pppq_ofs[i];
+			u32 qid, p;
+
+			mac = netdev_priv(ndev);
+			ds = ndev->dsa_ptr->ds;
+
+			for (p = 0; p < ds->num_ports; p++) {
+				/* only handle user ports */
+				if (!dsa_is_user_port(ds, p))
+					continue;
+
+				dp = dsa_to_port(ds, p);
+				if (dp->index >= ARRAY_SIZE(mac->dsa_user_idx))
+					continue;
+
+				mtk_eth_set_dsa_user_idx(eth, dp->slave);
+
+				qid = MTK_MAX_DEVS + pppq_ofs + mac->dsa_user_idx[dp->index];
+				pppq_map[qid % MTK_QDMA_NUM_QUEUES] = dp->slave;
+				/* TCP ACK use high priority queue in HNAT */
+				qid += eth->pppq_ofs[MTK_MAX_DEVS];
+				pppq_map[qid % MTK_QDMA_NUM_QUEUES] = dp->slave;
+			}
+		}
+	}
+
 	seq_puts(m, "Usage of the QDMA PPPQ for the HW path:\n");
-	for (i = 0; i < 64; i++)
-		seq_printf(m, "qdma_txq%d:	%5d Mbps %8d refcnt\n",
-			   i, eth->qdma_shaper.speed[i],
-			   atomic_read(&eth->qdma_shaper.refcnt[i]));
-	seq_printf(m, "qdma_thres:	%5d Mbps\n", eth->qdma_shaper.threshold);
+	for (i = 0; i < MTK_QDMA_NUM_QUEUES; i++) {
+		if (pppq_map[i])
+			seq_printf(m, "qdma_txq%d:	%8s	%5d Mbps %8d refcnt\n",
+				   i, pppq_map[i]->name, eth->qdma_shaper.speed[i],
+				   atomic_read(&eth->qdma_shaper.refcnt[i]));
+	}
 
 	return 0;
 }
