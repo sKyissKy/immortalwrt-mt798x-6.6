@@ -1,0 +1,30 @@
+From: Petr Wozniak <petr.wozniak@gmail.com>
+Date: Sun, 06 Jul 2026 16:00:00 +0200
+Subject: [PATCH] net: pcs: mtk-lynxi: don't report link up with unresolved speed in update_state
+
+Add a default case to the speed-decode switch that forces link down when
+the speed field is an unrecognized value, so phylink re-polls until the
+speed resolves.
+
+Signed-off-by: Petr Wozniak <petr.wozniak@gmail.com>
+---
+ drivers/net/pcs/pcs-mtk-lynxi.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+--- a/drivers/net/pcs/pcs-mtk-lynxi.c
++++ b/drivers/net/pcs/pcs-mtk-lynxi.c
+@@ -152,6 +152,14 @@ static void mtk_pcs_lynxi_update_state(s
+ 			rgc3 &= SGMII_PHY_SPEED_MASK;
+ 			state->speed = (rgc3 == SGMII_PHY_SPEED_3_125G) ? SPEED_2500 : SPEED_1000;
+ 			break;
++		default:
++			/* Speed field read back a reserved value during mode
++			 * transition (e.g. XGDM->GDM on warm reboot). Keep
++			 * link down so phylink re-polls until speed resolves.
++			 */
++			state->link = false;
++			mutex_unlock(&mpcs->regmap_lock);
++			return;
+ 		}
+ 
+ 		if (sgm_mode & SGMII_DUPLEX_HALF)
