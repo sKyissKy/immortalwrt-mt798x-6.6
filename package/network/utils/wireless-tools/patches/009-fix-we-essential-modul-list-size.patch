@@ -1,0 +1,12 @@
+--- a/iwlib.h
++++ b/iwlib.h
+@@ -486,5 +486,9 @@ extern const char * const	iw_operation_m
+ 
+ /* Modulations as human readable strings */
+ extern const struct iw_modul_descr	iw_modul_list[];
++#ifndef WE_ESSENTIAL
+ #define IW_SIZE_MODUL_LIST	16
++#else
++#define IW_SIZE_MODUL_LIST	10
++#endif
+ 
