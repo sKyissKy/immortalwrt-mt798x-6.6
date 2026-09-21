@@ -1,0 +1,72 @@
+--- a/mt_wifi/common/cmm_info.c
++++ b/mt_wifi/common/cmm_info.c
+@@ -39,7 +39,9 @@
+ #endif
+ 
+ #define MCAST_WCID_TO_REMOVE 0 /* Pat: TODO */
++#ifndef MIN
+ #define MIN(a, b)					((a) < (b) ? (a) : (b))
++#endif
+ INT UNII4BandSupportRegions[] = {25, 26};
+ INT MCSMappingRateTable[] = {
+ 	2,  4, 11, 22, 12,  18,  24,  36, 48,  72,  96, 108, 109, 110, 111, 112,/* CCK and OFDM */
+--- a/mt_wifi/include/wlanif/wlan_common.h
++++ b/mt_wifi/include/wlanif/wlan_common.h
+@@ -107,8 +107,12 @@
+ 	ACL_POLICY_ALLOW	= 2				/* allow traffic from MAC */
+ };
+ 
++#ifndef MIN
+ #define MIN(a, b)					((a) < (b) ? (a) : (b))
++#endif
++#ifndef MAX
+ #define MAX(a, b)					((a) > (b) ? (a) : (b))
++#endif
+ 
+ #define SETBIT(a,i)					((a)[(i) >> 3] |= 1 << ((i) & (NBBY - 1)))
+ #define CLRBIT(a,i)					((a)[(i) >> 3] &= ~(1 << ((i) & (NBBY - 1))))
+--- a/mt_wifi/feature/rrm/rrm.c
++++ b/mt_wifi/feature/rrm/rrm.c
+@@ -2504,7 +2504,9 @@
+ 		IN PRTMP_ADAPTER pAd,
+ 		IN MLME_QUEUE_ELEM *Elem)
+ {
++#ifndef MIN
+ #define MIN(_x, _y) ((_x) > (_y) ? (_x) : (_y))
++#endif
+ 	MEASURE_REQ_INFO MeasureReqInfo;
+ 	RRM_BEACON_REQ_INFO BcnReq;
+ 	PFRAME_802_11 pFr = (PFRAME_802_11)Elem->Msg;
+--- a/mt_wifi/feature/rrm/rrm_tlv.c
++++ b/mt_wifi/feature/rrm/rrm_tlv.c
+@@ -979,7 +979,9 @@
+ 	IN PCHAR pSsid,
+ 	IN UINT8 SsidLen)
+ {
++#ifndef MIN
+ #define MIN(_x, _y) ((_x) > (_y) ? (_x) : (_y))
++#endif
+ 	UINT loop;
+ 	HEADER_802_11 ActHdr;
+ 	PUCHAR pOutBuffer = NULL;
+--- a/wlan_hwifi/utility.h
++++ b/wlan_hwifi/utility.h
+@@ -35,14 +35,18 @@
+ 
+ #define __bf_shf(x) (__builtin_ffsll(x) - 1)
+ 
++#ifndef field_prep
+ #define field_prep(_mask, _val)						\
+ 	({								\
+ 		((typeof(_mask))(_val) << __bf_shf(_mask)) & (_mask);	\
+ 	})
++#endif
+ 
++#ifndef field_get
+ #define field_get(_mask, _reg)						\
+ 	({								\
+ 		(typeof(_mask))(((_reg) & (_mask)) >> __bf_shf(_mask));	\
+ 	})
++#endif
+ 
+ #define SET_FIELD(_field, _val)	\
