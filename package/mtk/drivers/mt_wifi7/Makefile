@@ -305,7 +305,7 @@ BACKPORT_VERSION:=$(lastword $(subst /, , $(shell find $(KERNEL_BUILD_DIR) -type
 define KernelPackage/mt_wifi7
   CATEGORY:=MTK Properties
   TITLE:=MTK wifi7 AP driver
-  DEPENDS:=blkid +MTK_WIFI7_CFG80211_SUPPORT:kmod-cfg80211 +kmod-mt_wifi_cmn
+  DEPENDS:=+blkid +MTK_WIFI7_CFG80211_SUPPORT:kmod-cfg80211 +kmod-mt_wifi_cmn
 ifeq ($(CONFIG_MTK_CONNINFRA_APSOC),y)
   DEPENDS+=+kmod-conninfra
 endif
