@@ -1,0 +1,22 @@
+{
+	"luci-app-Airpifanctrl": {
+		"description": "Grant access for luci-app-Airpifanctrl",
+		"read": {
+			"cgi-io": [ "exec" ],
+			"file": {
+				"/usr/bin/fanspeed.conf": [ "read" ],
+				"/etc/fanvall": [ "read" ],
+				"/etc/fanvallv.conf": [ "read" ],
+				"/sys/class/thermal/thermal_zone0/temp": [ "read" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/etc/fanvall": [ "write" ],
+				"/etc/fanvallv.conf": [ "write" ],
+				"/usr/bin/fanspeed.conf": [ "write" ],
+				"/sys/devices/platform/pwm-fan/hwmon/hwmon2/pwm1": [ "write" ]
+			}
+		}
+	}
+}

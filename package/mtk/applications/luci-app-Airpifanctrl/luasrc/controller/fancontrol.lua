@@ -1,33 +1,22 @@
 module("luci.controller.fancontrol", package.seeall)
 
 function index()
-    entry({"admin", "status", "fancontrol"}, template("Airpifanctrl/fancontrol"), _("风扇控制"), 94)
+    local page = entry({"admin", "status", "fancontrol"}, template("Airpifanctrl/fancontrol"), _("风扇控制"), 94)
+    page.acl_depends = { "luci-app-Airpifanctrl" }
     entry({"admin", "fancontrol", "fanstop"}, call("action_fanstop"))
     entry({"admin", "fancontrol", "fanst1"}, call("action_fanst1"))
     entry({"admin", "fancontrol", "fanst2"}, call("action_fanst2"))
-
-    -- 免认证 fanst3
-    local e_fanst3 = entry({"admin", "fancontrol", "fanst3"}, call("action_fanst3"))
-    e_fanst3.sysauth = false
-    e_fanst3.leaf = true
-
-    -- 免认证 fanst4
-    local e_fanst4 = entry({"admin", "fancontrol", "fanst4"}, call("action_fanst4"))
-    e_fanst4.sysauth = false
-    e_fanst4.leaf = true
-
+    entry({"admin", "fancontrol", "fanst3"}, call("action_fanst3"))
+    entry({"admin", "fancontrol", "fanst4"}, call("action_fanst4"))
     entry({"admin", "fancontrol", "fansttp"}, call("action_fansttp"))
     entry({"admin", "fancontrol", "fanst"}, call("action_fanst"))
     entry({"admin", "fancontrol", "fansvm"}, call("action_fansvm"))
     entry({"admin", "fancontrol", "fansvc"}, call("action_fansvc"))
     entry({"admin", "fancontrol", "fanswj"}, call("action_fanswj"))
     entry({"admin", "fancontrol", "fanswj2"}, call("action_fanswj2"))
-
-    -- 免认证 msg
-    local e_msg = entry({"admin", "fancontrol", "msg"}, call("action_msg"))
-    e_msg.sysauth = false
-    e_msg.leaf = true
+    entry({"admin", "fancontrol", "msg"}, call("action_msg"))
 end
+
 
 
 function action_msg()
@@ -57,8 +46,9 @@ function action_fanswj()
 	local file
 	local p = luci.http.formvalue("p")
 	local set = luci.http.formvalue("set")
-	fixed = set
-	port= string.gsub(p, "\"", "~")
+	local fixed = set
+	local port = tonumber(p) or 0
+	port = math.floor(math.max(0, math.min(255, port)))
 	rv["at"] = fixed 
 	rv["port"] = port
 	local handle = io.popen("pgrep -f fancts.sh")

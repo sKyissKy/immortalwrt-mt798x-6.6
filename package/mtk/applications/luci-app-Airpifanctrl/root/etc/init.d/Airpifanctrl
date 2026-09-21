@@ -7,15 +7,18 @@ printMsg() {
 } 
 
 restart(){                                                                                                       
-  /usr/bin/fancts.sh &
-  printMsg "Airpi风扇控制模块开始工作！"
-  cp /usr/bin/footer.htm /usr/lib/lua/luci/view/themes/argon/footer.htm
-  cp /usr/bin/wps /etc/rc.button/wps
+  stop
+  start
 }
 
 start(){
   /usr/bin/fancts.sh &
   printMsg "Airpi风扇控制模块开始工作！"
-  cp /usr/bin/footer.htm /usr/lib/lua/luci/view/themes/argon/footer.htm
-  cp /usr/bin/wps /etc/rc.button/wps
+  [ -d /usr/lib/lua/luci/view/themes/argon ] && cp /usr/bin/footer.htm /usr/lib/lua/luci/view/themes/argon/footer.htm
+  [ -d /etc/rc.button ] && cp /usr/bin/wps /etc/rc.button/wps
 }
+
+stop(){
+  killall -9 fancts.sh 2>/dev/null || true
+}
+
