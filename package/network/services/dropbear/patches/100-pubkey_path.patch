@@ -5,7 +5,8 @@
 +++ b/src/svr-authpubkey.c
 @@ -79,6 +79,39 @@ static void send_msg_userauth_pk_ok(cons
  		const unsigned char* keyblob, unsigned int keybloblen);
- static int checkfileperm(char * filename);
+-static int checkfileperm(char * filename);
++static int checkfileperm(const char * filename);
  
 +static const char * const global_authkeys_dir = "/etc/dropbear";
 +/* strlen(global_authkeys_dir) */
@@ -94,3 +95,7 @@
  	/* Walk back up path checking permissions, stopping at either homedir,
  	 * or root if the path is outside of the homedir. */
  	while ((sep = strrchr(path, '/')) != NULL) {
+@@ -595,3 +646,3 @@ out:
+-static int checkfileperm(char * filename) {
++static int checkfileperm(const char * filename) {
+ 	struct stat filestat;
