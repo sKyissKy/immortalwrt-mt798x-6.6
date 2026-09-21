@@ -92,15 +92,15 @@ end
 
 function ifup(ifname)
     if ifname and #ifname > 0 then
-        os.execute("ifconfig "..ifname.." up")
-        nixio.syslog("info", "mtwifi-cfg: ifconfig up "..ifname)
+        os.execute("ip link set dev "..ifname.." up")
+        nixio.syslog("info", "mtwifi-cfg: ip link set dev up "..ifname)
     end
 end
 
 function ifdown(ifname)
     if ifname and #ifname > 0 then
-        os.execute("ifconfig "..ifname.." down")
-        nixio.syslog("info", "mtwifi-cfg: ifconfig down "..ifname)
+        os.execute("ip link set dev "..ifname.." down")
+        nixio.syslog("info", "mtwifi-cfg: ip link set dev down "..ifname)
     end
 end
 
