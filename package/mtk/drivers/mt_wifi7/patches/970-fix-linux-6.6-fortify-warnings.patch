@@ -1,22 +1,48 @@
+From: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+Subject: [PATCH] mt_wifi7: fix Linux 6.6 fortify source warnings
+
+Signed-off-by: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+---
+ mt_wifi/ap/ap_cfg.c                           | 12 ++++--
+ mt_wifi/ap/ap_data.c                          |  6 ++-
+ .../glue/osal/include/sys_adaption.h          |  2 +
+ .../glue/osal/logan/sys_adaption_logan.c      | 11 ++++-
+ mt_wifi/chip/mcu/cmm_fw_uni_cmd.c             |  9 ++--
+ mt_wifi/common/bss_mngr/bss_mngr_element.c    |  2 +-
+ mt_wifi/common/cmm_info.c                     |  2 +-
+ mt_wifi/common/mgmt/mgmt_entrytb.c            |  3 +-
+ mt_wifi/common/qos.c                          | 13 +++---
+ mt_wifi/common/security/cmm_wpa.c             | 13 ++++--
+ mt_wifi/common/security/wpa3/bn_lib.c         | 41 +++++++++++--------
+ mt_wifi/feature/hs_r2/gas.c                   |  8 ++--
+ mt_wifi/feature/hs_r2/wnm.c                   | 20 +++++----
+ mt_wifi/feature/mbo/mbo.c                     |  3 +-
+ mt_wifi/feature/rrm/rrm_tlv.c                 |  2 +-
+ mt_wifi/hw_ctrl/hdev_ctrl.c                   |  4 +-
+ mt_wifi/include/ap/ap_mbss.h                  |  2 +-
+ mt_wifi/include/rtmp_os.h                     |  2 +
+ mt_wifi/os/linux/ap_ioctl.c                   | 11 ++---
+ mt_wifi/os/linux/rt_linux.c                   | 11 ++++-
+ mt_wifi/os/linux/sta_ioctl.c                  |  2 +-
+ mt_wifi/profiles/cmm_profile.c                |  3 +-
+ mt_wifi/sta/sta_cfg.c                         | 24 ++++++++---
+ mt_wifi/sta/wpa.c                             |  3 +-
+ mt_wifi_ap/Makefile                           |  1 -
+ wlan_hwifi/Makefile                           |  1 -
+ 26 files changed, 138 insertions(+), 73 deletions(-)
+
 diff --git a/mt_wifi/ap/ap_cfg.c b/mt_wifi/ap/ap_cfg.c
-index 18ce9e28d7..fc692554f6 100644
+index 18ce9e2..34c220b 100644
 --- a/mt_wifi/ap/ap_cfg.c
 +++ b/mt_wifi/ap/ap_cfg.c
-@@ -9319,10 +9319,11 @@ INT RTMPAPQueryInformation(
- 		PMAC_TABLE_ENTRY pEntry = NULL;
- 		p_rrm_command_t p_rrm_command = NULL;
+@@ -9321,6 +9321,7 @@ INT RTMPAPQueryInformation(
  		BSS_STRUCT *pMbss = NULL;
--		PUINT8 p_cap = NULL;
--		UINT16 TotalLen = 0;
-+		PUINT8 p_cap = NULL;
-+		UINT16 TotalLen = 0;
+ 		PUINT8 p_cap = NULL;
+ 		UINT16 TotalLen = 0;
 +		UINT i;
  
--		if (!VALID_MBSS(pAd, apidx))
-+		if (!VALID_MBSS(pAd, apidx))
+ 		if (!VALID_MBSS(pAd, apidx))
  			return -EFAULT;
- 
- 		pMbss = &pAd->ApCfg.MBSSID[apidx];
 @@ -9373,10 +9374,14 @@ INT RTMPAPQueryInformation(
  		}
  		/*check for btm capablility*/
@@ -49,7 +75,7 @@ index 18ce9e28d7..fc692554f6 100644
  }
 -
 diff --git a/mt_wifi/ap/ap_data.c b/mt_wifi/ap/ap_data.c
-index eeea3b8481..67ad5cce6b 100644
+index eeea3b8..67ad5cc 100644
 --- a/mt_wifi/ap/ap_data.c
 +++ b/mt_wifi/ap/ap_data.c
 @@ -1165,7 +1165,8 @@ static inline VOID ap_build_802_11_header(RTMP_ADAPTER *pAd, struct _TX_BLK *pTx
@@ -73,7 +99,7 @@ index eeea3b8481..67ad5cce6b 100644
  				pTxBlk->wifi_hdr_len += MAC_ADDR_LEN;
  			} else
 diff --git a/mt_wifi/ate/wlan_service/glue/osal/include/sys_adaption.h b/mt_wifi/ate/wlan_service/glue/osal/include/sys_adaption.h
-index a74119ab9f..8e63120a3b 100644
+index a74119a..8e63120 100644
 --- a/mt_wifi/ate/wlan_service/glue/osal/include/sys_adaption.h
 +++ b/mt_wifi/ate/wlan_service/glue/osal/include/sys_adaption.h
 @@ -83,6 +83,8 @@ typedef struct serv_os_task {
@@ -86,7 +112,7 @@ index a74119ab9f..8e63120a3b 100644
  typedef s_int32(*SERV_OS_TASK_CALLBACK) (u_long);
  
 diff --git a/mt_wifi/ate/wlan_service/glue/osal/logan/sys_adaption_logan.c b/mt_wifi/ate/wlan_service/glue/osal/logan/sys_adaption_logan.c
-index 3424f1e1a4..260e4a24da 100644
+index 3424f1e..260e4a2 100644
 --- a/mt_wifi/ate/wlan_service/glue/osal/logan/sys_adaption_logan.c
 +++ b/mt_wifi/ate/wlan_service/glue/osal/logan/sys_adaption_logan.c
 @@ -92,6 +92,13 @@ static inline s_int32 _sys_ad_kill_os_task(struct serv_os_task *task)
@@ -115,7 +141,7 @@ index 3424f1e1a4..260e4a24da 100644
  
  	if (IS_ERR(task->kthread_task)) {
 diff --git a/mt_wifi/chip/mcu/cmm_fw_uni_cmd.c b/mt_wifi/chip/mcu/cmm_fw_uni_cmd.c
-index ce1234805d..a0ea522545 100644
+index ce12348..a0ea522 100644
 --- a/mt_wifi/chip/mcu/cmm_fw_uni_cmd.c
 +++ b/mt_wifi/chip/mcu/cmm_fw_uni_cmd.c
 @@ -11085,7 +11085,8 @@ INT32 UniCmdSetRadarThresParam(
@@ -149,7 +175,7 @@ index ce1234805d..a0ea522545 100644
  			RTMP_SEM_EVENT_UP(&pAd->AutoRateLock);
  		} while (0);
 diff --git a/mt_wifi/common/bss_mngr/bss_mngr_element.c b/mt_wifi/common/bss_mngr/bss_mngr_element.c
-index 8988b89a5f..8e78091fd7 100644
+index 8988b89..8e78091 100644
 --- a/mt_wifi/common/bss_mngr/bss_mngr_element.c
 +++ b/mt_wifi/common/bss_mngr/bss_mngr_element.c
 @@ -532,7 +532,7 @@ u8 *build_rnr_ie(struct bmgr_entry *repting_entry, struct bmgr_entry *repted_ent
@@ -162,7 +188,7 @@ index 8988b89a5f..8e78091fd7 100644
  		/* NAP Info: TBTT Information Header */
  		SET_DOT11_RNR_TBTT_INFO_HDR_TYPE(tbtt_info_hdr, 0);
 diff --git a/mt_wifi/common/cmm_info.c b/mt_wifi/common/cmm_info.c
-index 6d9afdafcf..7695a922f3 100644
+index 6d9afda..7695a92 100644
 --- a/mt_wifi/common/cmm_info.c
 +++ b/mt_wifi/common/cmm_info.c
 @@ -13777,7 +13777,7 @@ INT show_sysinfo_proc(RTMP_ADAPTER *pAd, RTMP_STRING *arg)
@@ -175,7 +201,7 @@ index 6d9afdafcf..7695a922f3 100644
  				MTWF_PRINT("\t\tOS NetDev status(%s[%d]-"MACSTR"):\n",
  						  RtmpOsGetNetDevName(wdev->if_dev),
 diff --git a/mt_wifi/common/mgmt/mgmt_entrytb.c b/mt_wifi/common/mgmt/mgmt_entrytb.c
-index 85dddac75b..fe56d2aee8 100644
+index 85dddac..fe56d2a 100644
 --- a/mt_wifi/common/mgmt/mgmt_entrytb.c
 +++ b/mt_wifi/common/mgmt/mgmt_entrytb.c
 @@ -912,7 +912,8 @@ INT MacTableResetEntry(RTMP_ADAPTER *pAd, MAC_TABLE_ENTRY *pEntry, BOOLEAN clean
@@ -189,7 +215,7 @@ index 85dddac75b..fe56d2aee8 100644
  	if (clean == TRUE) {
  		pEntry->MaxSupportedRate = RATE_11;
 diff --git a/mt_wifi/common/qos.c b/mt_wifi/common/qos.c
-index 7921c60eec..a81075da1f 100644
+index 7921c60..a81075d 100644
 --- a/mt_wifi/common/qos.c
 +++ b/mt_wifi/common/qos.c
 @@ -562,10 +562,13 @@ INT QoS_send_action_frame(PRTMP_ADAPTER pAd, struct wifi_dev *wdev, struct actio
@@ -236,7 +262,7 @@ index 7921c60eec..a81075da1f 100644
  	wapp_send_wapp_qry_rsp(pAd, event);
  	os_free_mem(buf);
 diff --git a/mt_wifi/common/security/cmm_wpa.c b/mt_wifi/common/security/cmm_wpa.c
-index 83b939cdc9..9a0a60fd43 100644
+index 83b939c..9a0a60f 100644
 --- a/mt_wifi/common/security/cmm_wpa.c
 +++ b/mt_wifi/common/security/cmm_wpa.c
 @@ -27,6 +27,11 @@
@@ -282,7 +308,7 @@ index 83b939cdc9..9a0a60fd43 100644
  
  		key_data_ptr[0] = 0xDD;
 diff --git a/mt_wifi/common/security/wpa3/bn_lib.c b/mt_wifi/common/security/wpa3/bn_lib.c
-index b1e7a8666f..fd2934c0a4 100644
+index b1e7a86..fd2934c 100644
 --- a/mt_wifi/common/security/wpa3/bn_lib.c
 +++ b/mt_wifi/common/security/wpa3/bn_lib.c
 @@ -315,15 +315,15 @@ static BN_ULONG *bn_expand_internal(const BIGNUM *b, int words)
@@ -377,7 +403,7 @@ index b1e7a8666f..fd2934c0a4 100644
  	case 1:
  		BN_CONSTTIME_SWAP(0);
 diff --git a/mt_wifi/feature/hs_r2/gas.c b/mt_wifi/feature/hs_r2/gas.c
-index 24040b40d9..4d7d49d342 100644
+index 24040b4..4d7d49d 100644
 --- a/mt_wifi/feature/hs_r2/gas.c
 +++ b/mt_wifi/feature/hs_r2/gas.c
 @@ -335,7 +335,7 @@ VOID SendGASRsp(
@@ -417,7 +443,7 @@ index 24040b40d9..4d7d49d342 100644
  		*Pos++ = 2; /* Length field */
  		*Pos++ = 0; /* Query response info field */
 diff --git a/mt_wifi/feature/hs_r2/wnm.c b/mt_wifi/feature/hs_r2/wnm.c
-index fb17a57659..fd61a0fdf0 100644
+index fb17a57..fd61a0f 100644
 --- a/mt_wifi/feature/hs_r2/wnm.c
 +++ b/mt_wifi/feature/hs_r2/wnm.c
 @@ -279,11 +279,15 @@ void wext_send_proxy_arp_event(PNET_DEV net_dev,
@@ -466,7 +492,7 @@ index fb17a57659..fd61a0fdf0 100644
  			MTWF_DBG(pAd, DBG_CAT_PROTO, CATPROTO_WNM, DBG_LVL_ERROR,
  				"Not have enough buffer size for WNMFrame->u.WNM_NOTIFY_REQ.Variable!\n");
 diff --git a/mt_wifi/feature/mbo/mbo.c b/mt_wifi/feature/mbo/mbo.c
-index b7f1887bc5..c15d4e8aa8 100644
+index b7f1887..c15d4e8 100644
 --- a/mt_wifi/feature/mbo/mbo.c
 +++ b/mt_wifi/feature/mbo/mbo.c
 @@ -538,7 +538,8 @@ static VOID WextMboSendNeighborReportToDaemonEvent(
@@ -480,7 +506,7 @@ index b7f1887bc5..c15d4e8aa8 100644
  						OID_NEIGHBOR_REPORT, NULL, (PUCHAR)buf, buflen);
  #endif
 diff --git a/mt_wifi/feature/rrm/rrm_tlv.c b/mt_wifi/feature/rrm/rrm_tlv.c
-index 6706bffea8..c18db7e163 100644
+index 6706bff..c18db7e 100644
 --- a/mt_wifi/feature/rrm/rrm_tlv.c
 +++ b/mt_wifi/feature/rrm/rrm_tlv.c
 @@ -883,7 +883,7 @@ INT rrm_send_beacon_req_param(
@@ -493,7 +519,7 @@ index 6706bffea8..c18db7e163 100644
  	if (MlmeEnqueue(pAd, BCN_STATE_MACHINE, BCN_REQ, Len, pBuf, 0) == FALSE) {
  		NStatus = NDIS_STATUS_FAILURE;
 diff --git a/mt_wifi/hw_ctrl/hdev_ctrl.c b/mt_wifi/hw_ctrl/hdev_ctrl.c
-index 3bfa47c502..9fcc86c86f 100644
+index 3bfa47c..9fcc86c 100644
 --- a/mt_wifi/hw_ctrl/hdev_ctrl.c
 +++ b/mt_wifi/hw_ctrl/hdev_ctrl.c
 @@ -1799,7 +1799,7 @@ UINT32 hc_get_asic_cap(void *hdev_ctrl)
@@ -515,7 +541,7 @@ index 3bfa47c502..9fcc86c86f 100644
  	struct hdev_ctrl *ctrl = hdev_ctrl;
  	struct _RTMP_ADAPTER *ad = hc_get_hdev_privdata(ctrl);
 diff --git a/mt_wifi/include/ap/ap_mbss.h b/mt_wifi/include/ap/ap_mbss.h
-index aa9644fceb..c90133f9be 100644
+index aa9644f..c90133f 100644
 --- a/mt_wifi/include/ap/ap_mbss.h
 +++ b/mt_wifi/include/ap/ap_mbss.h
 @@ -50,5 +50,5 @@ BOOLEAN MBSS_Reconfig_Is_Idle(RTMP_ADAPTER *pAd, BSS_STRUCT *pMbss);
@@ -526,7 +552,7 @@ index aa9644fceb..c90133f9be 100644
 +VOID MBSS_Reconfig_SM(RTMP_ADAPTER *pAd, struct wifi_dev *wdev, enum bss_reconfig_state reconfig_state);
  NTSTATUS MBSS_Reconfig_SM_Handler(RTMP_ADAPTER *pAd, PCmdQElmt CMDQelmt);
 diff --git a/mt_wifi/include/rtmp_os.h b/mt_wifi/include/rtmp_os.h
-index fcfbe7bdb6..989e180188 100644
+index fcfbe7b..989e180 100644
 --- a/mt_wifi/include/rtmp_os.h
 +++ b/mt_wifi/include/rtmp_os.h
 @@ -119,6 +119,8 @@ typedef struct _RTMP_OS_TASK_ {
@@ -539,7 +565,7 @@ index fcfbe7bdb6..989e180188 100644
  } OS_TASK;
  
 diff --git a/mt_wifi/os/linux/ap_ioctl.c b/mt_wifi/os/linux/ap_ioctl.c
-index ec63a93cb3..a057d6f745 100644
+index ec63a93..a057d6f 100644
 --- a/mt_wifi/os/linux/ap_ioctl.c
 +++ b/mt_wifi/os/linux/ap_ioctl.c
 @@ -892,12 +892,13 @@ INT rt28xx_ap_ioctl(void *net_dev_obj, void *data_obj, int cmd) /* snowpin for a
@@ -562,7 +588,7 @@ index ec63a93cb3..a057d6f745 100644
  		Status = RTMP_IO_EOPNOTSUPP;
  		break;
 diff --git a/mt_wifi/os/linux/rt_linux.c b/mt_wifi/os/linux/rt_linux.c
-index 727a58390d..c3973bbb78 100644
+index 727a583..c3973bb 100644
 --- a/mt_wifi/os/linux/rt_linux.c
 +++ b/mt_wifi/os/linux/rt_linux.c
 @@ -1056,6 +1056,13 @@ static inline void __RtmpOSTaskCustomize(OS_TASK *pTask)
@@ -591,7 +617,7 @@ index 727a58390d..c3973bbb78 100644
  
  	if (IS_ERR(pTask->kthread_task)) {
 diff --git a/mt_wifi/os/linux/sta_ioctl.c b/mt_wifi/os/linux/sta_ioctl.c
-index 1d9e9c60bc..85805b3b22 100644
+index 1d9e9c6..85805b3 100644
 --- a/mt_wifi/os/linux/sta_ioctl.c
 +++ b/mt_wifi/os/linux/sta_ioctl.c
 @@ -2727,7 +2727,7 @@ static const iw_handler rt_handler[] = {
@@ -604,7 +630,7 @@ index 1d9e9c60bc..85805b3b22 100644
  	(iw_handler) NULL,		                /* SIOCGIWSPY    */
  	(iw_handler) NULL,				        /* SIOCSIWTHRSPY */
 diff --git a/mt_wifi/profiles/cmm_profile.c b/mt_wifi/profiles/cmm_profile.c
-index 2d301c69d4..f33f0b6998 100644
+index 2d301c6..f33f0b6 100644
 --- a/mt_wifi/profiles/cmm_profile.c
 +++ b/mt_wifi/profiles/cmm_profile.c
 @@ -6173,7 +6173,7 @@ NDIS_STATUS	RTMPSetProfileParameters(
@@ -622,7 +648,7 @@ index 2d301c69d4..f33f0b6998 100644
  #endif /* !CONFIG_PROFILE_OFF */
 -
 diff --git a/mt_wifi/sta/sta_cfg.c b/mt_wifi/sta/sta_cfg.c
-index db9bad7013..2e39f95d9b 100644
+index db9bad7..2e39f95 100644
 --- a/mt_wifi/sta/sta_cfg.c
 +++ b/mt_wifi/sta/sta_cfg.c
 @@ -3925,13 +3925,16 @@ INT RTMPQueryInformation(
@@ -668,7 +694,7 @@ index db9bad7013..2e39f95d9b 100644
  					}
  				}
 diff --git a/mt_wifi/sta/wpa.c b/mt_wifi/sta/wpa.c
-index 7868a27ffb..e20c9872ba 100644
+index 7868a27..e20c987 100644
 --- a/mt_wifi/sta/wpa.c
 +++ b/mt_wifi/sta/wpa.c
 @@ -221,7 +221,8 @@ VOID WpaMicFailureReportFrame(
@@ -681,3 +707,27 @@ index 7868a27ffb..e20c9872ba 100644
  	/* copy frame to Tx ring and send MIC failure report frame to authenticator */
  	RTMPToWirelessSta(pAd, pEntry,
  					  Header802_3, LENGTH_802_3,
+diff --git a/mt_wifi_ap/Makefile b/mt_wifi_ap/Makefile
+index 009b6f5..ab598b4 100644
+--- a/mt_wifi_ap/Makefile
++++ b/mt_wifi_ap/Makefile
+@@ -94,7 +94,6 @@ include $(TOP_DIR)/mk/obj/profiles.mk
+ 
+ ccflags-y += $(WFLAGS)
+ ccflags-y += -Wno-error=misleading-indentation
+-ccflags-y += -Wno-error=attribute-warning
+ ccflags-y += -Wno-error=enum-conversion
+ ccflags-y += -Wno-error=enum-int-mismatch
+ ccflags-y += -Wno-error=cast-function-type
+diff --git a/wlan_hwifi/Makefile b/wlan_hwifi/Makefile
+index 7e1474a..7f951bb 100644
+--- a/wlan_hwifi/Makefile
++++ b/wlan_hwifi/Makefile
+@@ -81,7 +81,6 @@ endif
+ 
+ #ccflags-y += -DCONFIG_HWIFI_FW_HDR_SUPPORT
+ ccflags-y += -Wno-error=enum-conversion
+-ccflags-y += -Wno-error=attribute-warning
+ ccflags-y += -Wno-error=enum-int-mismatch
+ ccflags-y += -Wno-error=cast-function-type
+ ccflags-y += -Wno-error=implicit-fallthrough
