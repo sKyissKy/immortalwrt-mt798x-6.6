@@ -1,0 +1,31 @@
+From 22e8c16d9debfacbc0dfdd5ea21dc6a7442854cf Mon Sep 17 00:00:00 2001
+From: Sebastian Ertz <sebastian.ertz@gmx.de>
+Date: Fri, 16 May 2025 20:10:23 +0200
+Subject: [PATCH] debug: fix crash when passing tagged string to getinfo()
+
+Fix the existing, incorrectly inverted logic to prevent dereferencing
+tagged value pointers.
+
+Suggested-by: Sebastian Ertz <sebastian.ertz@gmx.de>
+[whitespace fix, commit message]
+Signed-off-by: Jo-Philipp Wich <jo@mein.io>
+---
+ lib/debug.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/lib/debug.c b/lib/debug.c
+index 593270ef..eea91d4c 100644
+--- a/lib/debug.c
++++ b/lib/debug.c
+@@ -1118,7 +1118,7 @@ uc_getinfo(uc_vm_t *vm, size_t nargs)
+ 		break;
+ 
+ 	case UC_STRING:
+-		if (pv & 3) {
++		if (!(pv & 3)) {
+ 			uvstr = (uc_string_t *)uv;
+ 
+ 			ucv_object_add(rv, "address",
+-- 
+2.43.0
+

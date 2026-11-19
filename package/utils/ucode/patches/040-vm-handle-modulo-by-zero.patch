@@ -1,0 +1,59 @@
+From cf846c4a11d4e0eb2e317e82001404c954f82eb2 Mon Sep 17 00:00:00 2001
+From: Sebastian Ertz <sebastian.ertz@gmx.de>
+Date: Mon, 30 Jun 2025 12:17:51 +0200
+Subject: [PATCH] vm: properly handle modulo by zero
+
+Prevent floating-point exception triggered when calculating modulo
+by zero. Ensure to produce a NaN result in this case.
+
+Add a testcase for this situation as well.
+
+Suggested-by: Sebastian Ertz <sebastian.ertz@gmx.de>
+[reword commit message, squash commits]
+Signed-off-by: Jo-Philipp Wich <jo@mein.io>
+---
+ tests/custom/01_arithmetic/02_modulo | 6 ++++++
+ vm.c                                 | 5 ++++-
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/tests/custom/01_arithmetic/02_modulo b/tests/custom/01_arithmetic/02_modulo
+index c011e042..6b98ddab 100644
+--- a/tests/custom/01_arithmetic/02_modulo
++++ b/tests/custom/01_arithmetic/02_modulo
+@@ -13,6 +13,9 @@ yields the remaining value as calculated by fmod(3):
+ 10.2 % 4 = 2.2
+ 10 % 4.3 = 1.4
+ "10.4" % 4 = 2.4
++
++Modulo by zero yields NaN:
++1 % 0 = NaN
+ -- End --
+ 
+ -- Testcase --
+@@ -28,4 +31,7 @@ yields the remaining value as calculated by fmod(3):
+ 10.2 % 4 = {{ 10.2 % 4 }}
+ 10 % 4.3 = {{ 10 % 4.3 }}
+ "10.4" % 4 = {{ "10.4" % 4 }}
++
++Modulo by zero yields NaN:
++1 % 0 = {{ 1 % 0 }}
+ -- End --
+diff --git a/vm.c b/vm.c
+index 462a5d92..61b5e527 100644
+--- a/vm.c
++++ b/vm.c
+@@ -1733,7 +1733,10 @@ uc_vm_value_arith(uc_vm_t *vm, uc_vm_insn_t operation, uc_value_t *value, uc_val
+ 			break;
+ 
+ 		case I_MOD:
+-			if (n1 < 0 || n2 < 0) {
++			if (n2 == 0) {
++				rv = ucv_double_new(NAN);
++			}
++			else if (n1 < 0 || n2 < 0) {
+ 				rv = ucv_int64_new(n1 % n2);
+ 			}
+ 			else {
+-- 
+2.43.0
+
