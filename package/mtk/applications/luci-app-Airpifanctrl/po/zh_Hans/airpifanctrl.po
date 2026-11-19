@@ -8,8 +8,8 @@ msgstr ""
 "Content-Transfer-Encoding: 8bit\n"
 "Plural-Forms: nplurals=1; plural=0;\n"
 
-msgid "5G Modem Chip Temperature (AT^CHIPTEMP)"
-msgstr "5G 模组芯片温度 (AT^CHIPTEMP)"
+msgid "5G Modem Chip Temperature (AT+QTEMP / AT^CHIPTEMP)"
+msgstr "5G 模组芯片温度 (AT+QTEMP / AT^CHIPTEMP)"
 
 msgid "5G Modem Temperature"
 msgstr "5G模组温度"

@@ -13,6 +13,23 @@
 
 var isReadonlyView = !L.hasViewPermission();
 
+function notifyDismissible(title, body, cls) {
+	var msg = ui.addNotification(title, body, cls);
+	if (msg) {
+		msg.querySelectorAll('.btn').forEach(function(btn) {
+			btn.addEventListener('click', function() {
+				msg.classList.add('fade-out');
+				msg.classList.remove('fade-in');
+				window.setTimeout(function() {
+					if (msg.parentNode)
+						msg.parentNode.removeChild(msg);
+				}, 180);
+			});
+		});
+	}
+	return msg;
+}
+
 function is_mtwifi_device(device_name) {
 	return (typeof(device_name) == 'string' &&
 		uci.get('wireless', device_name, 'type') == 'mtwifi');
@@ -310,7 +327,7 @@ function network_updown(id, map, ev) {
 		});
 		let err = getMtwifiApLimitError(targetDevs, targetIfaces);
 		if (err) {
-			ui.addNotification(null, E('p', err), 'error');
+			notifyDismissible(null, E('p', err), 'error');
 			return Promise.reject(new Error(err));
 		}
 
@@ -2585,14 +2602,14 @@ return view.extend({
 			return origSave.call(this, function() {
 				let err = validateStagedApCounts();
 				if (err) {
-					ui.addNotification(null, E('p', err), 'error');
+					notifyDismissible(null, E('p', err), 'error');
 					return Promise.reject(new Error(err));
 				}
 
 				return Promise.resolve(typeof(cb) === 'function' ? cb.apply(null, arguments) : null).then(function(res) {
 					let postErr = validateStagedApCounts();
 					if (postErr) {
-						ui.addNotification(null, E('p', postErr), 'error');
+						notifyDismissible(null, E('p', postErr), 'error');
 						return Promise.reject(new Error(postErr));
 					}
 					return res;
@@ -2613,7 +2630,7 @@ return view.extend({
 					if (dsc.getAttribute('restart') == '') {
 						dsc.setAttribute('restart', '1');
 						tasks.push(fs.exec('/sbin/wifi', ['up', section_ids[i]]).catch(function(e) {
-							ui.addNotification(null, E('p', e.message));
+							notifyDismissible(null, E('p', e.message));
 						}));
 					}
 					else if (dsc.getAttribute('restart') == '1') {

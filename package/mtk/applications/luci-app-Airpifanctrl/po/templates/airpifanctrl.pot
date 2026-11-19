@@ -1,7 +1,7 @@
 msgid ""
 msgstr "Content-Type: text/plain; charset=UTF-8"
 
-msgid "5G Modem Chip Temperature (AT^CHIPTEMP)"
+msgid "5G Modem Chip Temperature (AT+QTEMP / AT^CHIPTEMP)"
 msgstr ""
 
 msgid "5G Modem Temperature"

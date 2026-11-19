@@ -695,6 +695,46 @@ function detect_modem_at_ports() {
 	return ports;
 }
 
+function detect_sms_tool_ports() {
+	let ports = [];
+	let seen = {};
+	let add_port = function(p) {
+		if (!p || p == '' || seen[p] || !match(p, /^\/[A-Za-z0-9_\/\.\-]+$/))
+			return;
+		let fp = rpath(p);
+		if (fs.access(fp)) {
+			seen[p] = true;
+			push(ports, fp);
+		}
+	};
+
+	/* Prefer secondary AT port /dev/ttyUSB3 first to avoid racing with at-daemon on /dev/ttyUSB2 */
+	for (let p in ['/dev/ttyUSB3', '/dev/ttyUSB2', '/dev/ttyUSB1', '/dev/mhi_DUN'])
+		add_port(p);
+
+	return ports;
+}
+
+function query_at_daemon(port, cmd) {
+	if (ROOT != '')
+		return null;
+	if (!bus)
+		bus = libubus.connect(null, 5);
+	if (!bus)
+		return null;
+	let reply = bus.call('at-daemon', 'sendat', {
+		at_port: port,
+		at_cmd: cmd,
+		timeout: 2
+	});
+	let err = libubus.error();
+	if (err == 'Connection is closed' || err == 'Connection failed')
+		bus = null;
+	if (err != null || type(reply) != 'object')
+		return null;
+	return reply.response || reply.result || null;
+}
+
 function parse_qtemp_max(output) {
 	let best = null;
 	for (let line in split(output || '', /\r?\n/)) {
@@ -751,11 +791,23 @@ function run_cmd_capture(cmd) {
 }
 
 function parse_modem_temp() {
+	for (let p in detect_modem_at_ports()) {
+		let d_q = query_at_daemon(p, 'AT+QTEMP');
+		let dq_val = parse_qtemp_max(d_q);
+		if (dq_val != null)
+			return dq_val;
+
+		let d_c = query_at_daemon(p, 'AT^CHIPTEMP?');
+		let dc_val = parse_chiptemp_val(d_c);
+		if (dc_val != null)
+			return dc_val;
+	}
+
 	let sms_bin = fs.access(rpath('/usr/bin/sms_tool'), 'x')
 		? rpath('/usr/bin/sms_tool')
 		: ((ROOT == '' && fs.access('/usr/bin/sms_tool', 'x')) ? '/usr/bin/sms_tool' : null);
 	if (sms_bin) {
-		for (let p in detect_modem_at_ports()) {
+		for (let p in detect_sms_tool_ports()) {
 			let q_out = run_cmd_capture(`'${sms_bin}' -d '${p}' at 'AT+QTEMP' 2>/dev/null`);
 			let q_val = parse_qtemp_max(q_out);
 			if (q_val != null)

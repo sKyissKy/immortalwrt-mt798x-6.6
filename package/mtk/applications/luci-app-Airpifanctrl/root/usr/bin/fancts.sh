@@ -119,21 +119,32 @@ read_valid_temp() {
             if [ -r "${FANCTRL_ROOT}/etc/config/qmodem" ]; then
                 _at_ports=$(sed -n "s/.*option[[:space:]]\{1,\}at_port[[:space:]]\{1,\}['\"]\{0,1\}\([^'\"[:space:]]\{1,\}\)['\"]\{0,1\}.*/\1/p" "${FANCTRL_ROOT}/etc/config/qmodem" 2>/dev/null)
             fi
-            for _cand in $_at_ports /dev/ttyUSB3 /dev/ttyUSB2 /dev/ttyUSB1 /dev/mhi_DUN; do
-                _dev="${FANCTRL_ROOT}${_cand}"
-                [ -e "$_dev" ] || continue
-                if [ -x "${FANCTRL_ROOT}/usr/bin/sms_tool" ]; then
-                    temp=$("${FANCTRL_ROOT}/usr/bin/sms_tool" -d "$_dev" at 'AT+QTEMP' 2>/dev/null | parse_qtemp_output) || true
+            if [ -z "${FANCTRL_ROOT}" ] && command -v ubus >/dev/null 2>&1; then
+                for _cand in $_at_ports /dev/ttyUSB2 /dev/ttyUSB3; do
+                    [ -e "$_cand" ] || continue
+                    temp=$(ubus -t 2 call at-daemon sendat "{\"at_port\":\"$_cand\",\"at_cmd\":\"AT+QTEMP\",\"timeout\":2}" 2>/dev/null | sed 's/\\r/\n/g; s/\\n/\n/g; s/\\"/"/g' | parse_qtemp_output) || true
                     [ -n "$temp" ] && break
-                    temp=$("${FANCTRL_ROOT}/usr/bin/sms_tool" -d "$_dev" at 'AT^CHIPTEMP?' 2>/dev/null | parse_chiptemp_output) || true
+                    temp=$(ubus -t 2 call at-daemon sendat "{\"at_port\":\"$_cand\",\"at_cmd\":\"AT^CHIPTEMP?\",\"timeout\":2}" 2>/dev/null | sed 's/\\r/\n/g; s/\\n/\n/g; s/\\"/"/g' | parse_chiptemp_output) || true
                     [ -n "$temp" ] && break
-                elif [ -z "${FANCTRL_ROOT}" ] && command -v sms_tool >/dev/null 2>&1; then
-                    temp=$(sms_tool -d "$_dev" at 'AT+QTEMP' 2>/dev/null | parse_qtemp_output) || true
-                    [ -n "$temp" ] && break
-                    temp=$(sms_tool -d "$_dev" at 'AT^CHIPTEMP?' 2>/dev/null | parse_chiptemp_output) || true
-                    [ -n "$temp" ] && break
-                fi
-            done
+                done
+            fi
+            if [ -z "$temp" ]; then
+                for _cand in /dev/ttyUSB3 /dev/ttyUSB2 /dev/ttyUSB1 /dev/mhi_DUN $_at_ports; do
+                    _dev="${FANCTRL_ROOT}${_cand}"
+                    [ -e "$_dev" ] || continue
+                    if [ -x "${FANCTRL_ROOT}/usr/bin/sms_tool" ]; then
+                        temp=$("${FANCTRL_ROOT}/usr/bin/sms_tool" -d "$_dev" at 'AT+QTEMP' 2>/dev/null | parse_qtemp_output) || true
+                        [ -n "$temp" ] && break
+                        temp=$("${FANCTRL_ROOT}/usr/bin/sms_tool" -d "$_dev" at 'AT^CHIPTEMP?' 2>/dev/null | parse_chiptemp_output) || true
+                        [ -n "$temp" ] && break
+                    elif [ -z "${FANCTRL_ROOT}" ] && command -v sms_tool >/dev/null 2>&1; then
+                        temp=$(sms_tool -d "$_dev" at 'AT+QTEMP' 2>/dev/null | parse_qtemp_output) || true
+                        [ -n "$temp" ] && break
+                        temp=$(sms_tool -d "$_dev" at 'AT^CHIPTEMP?' 2>/dev/null | parse_chiptemp_output) || true
+                        [ -n "$temp" ] && break
+                    fi
+                done
+            fi
             if [ -z "$temp" ] && command -v sendat >/dev/null 2>&1; then
                 if [ -e "${FANCTRL_ROOT}/dev/ttyUSB1" ] || [ -e "/dev/ttyUSB1" ]; then
                     temp=$(sendat 1 'AT+QTEMP' 2>/dev/null | parse_qtemp_output) || true

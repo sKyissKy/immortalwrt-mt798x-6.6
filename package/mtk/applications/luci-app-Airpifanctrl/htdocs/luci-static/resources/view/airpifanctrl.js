@@ -42,6 +42,50 @@ var SOURCE_LABELS = {
 	'modem': _('5G Modem Temperature')
 };
 
+function updateStatusDOM(res) {
+	if (!res)
+		return;
+
+	var elTemp = document.getElementById('fan-temp-val');
+	var elSpeed = document.getElementById('fan-speed-val');
+	var elMode = document.getElementById('fan-mode-val');
+	var elSrc = document.getElementById('fan-src-val');
+
+	if (elTemp && res.fansttp != null)
+		elTemp.textContent = res.fansttp + ' °C';
+	if (elSpeed && res.fanspd != null)
+		elSpeed.textContent = res.fanspd + ' %';
+	if (elMode && res.mode != null)
+		elMode.textContent = MODE_LABELS[res.mode] || res.fancts || res.mode;
+	if (elSrc && res.temp_source != null)
+		elSrc.textContent = SOURCE_LABELS[res.temp_source] || res.fansv || res.temp_source;
+}
+
+function dismissBannerElement(msg) {
+	if (!msg)
+		return;
+	msg.classList.add('fade-out');
+	msg.classList.remove('fade-in');
+	window.setTimeout(function() {
+		if (msg.parentNode)
+			msg.parentNode.removeChild(msg);
+	}, 180);
+}
+
+function showBanner(title, children, timeoutMs, ...classes) {
+	var msg = (timeoutMs && timeoutMs > 0)
+		? ui.addTimeLimitedNotification(title, children, timeoutMs, ...classes)
+		: ui.addNotification(title, children, ...classes);
+	if (msg) {
+		msg.querySelectorAll('.btn').forEach(function(btn) {
+			btn.addEventListener('click', function() {
+				dismissBannerElement(msg);
+			});
+		});
+	}
+	return msg;
+}
+
 return view.extend({
 	load: function() {
 		return callGetStatus();
@@ -93,29 +137,17 @@ return view.extend({
 			]);
 
 			if (status.lucimsg)
-				ui.addNotification(null, E('p', _(status.lucimsg)), 'info');
+				showBanner(null, E('p', _(status.lucimsg)), 3500, 'info');
 
 			poll.add(function() {
 				return callGetStatus().then(function(res) {
 					if (!res)
 						return;
 
-					var elTemp = document.getElementById('fan-temp-val');
-					var elSpeed = document.getElementById('fan-speed-val');
-					var elMode = document.getElementById('fan-mode-val');
-					var elSrc = document.getElementById('fan-src-val');
-
-					if (elTemp && res.fansttp != null)
-						elTemp.textContent = res.fansttp + ' °C';
-					if (elSpeed && res.fanspd != null)
-						elSpeed.textContent = res.fanspd + ' %';
-					if (elMode && res.mode != null)
-						elMode.textContent = MODE_LABELS[res.mode] || res.fancts || res.mode;
-					if (elSrc && res.temp_source != null)
-						elSrc.textContent = SOURCE_LABELS[res.temp_source] || res.fansv || res.temp_source;
+					updateStatusDOM(res);
 
 					if (res.lucimsg)
-						ui.addNotification(null, E('p', _(res.lucimsg)), 'info');
+						showBanner(null, E('p', _(res.lucimsg)), 3500, 'info');
 				});
 			}, 5);
 
@@ -146,7 +178,7 @@ return view.extend({
 
 		o = s.option(form.ListValue, 'temp_id', _('Temperature Sensor Source'));
 		o.value('cpu', _('CPU Thermal Zone (thermal_zone0)'));
-		o.value('modem', _('5G Modem Chip Temperature (AT^CHIPTEMP)'));
+		o.value('modem', _('5G Modem Chip Temperature (AT+QTEMP / AT^CHIPTEMP)'));
 		o.default = 'cpu';
 		o.rmempty = false;
 
@@ -192,11 +224,12 @@ return view.extend({
 			return tasks.then(function() {
 				return callGetStatus().then(function(newStatus) {
 					viewSelf.initialStatus = newStatus || {};
-					ui.addNotification(null, E('p', _('Configuration has been applied.')), 'info');
+					updateStatusDOM(newStatus);
+					showBanner(null, E('p', _('Configuration has been applied.')), 3500, 'info');
 				});
 			});
 		}).catch(function(err) {
-			ui.addNotification(null, E('p', _('Failed to apply configuration: %s').format(err.message || err)), 'error');
+			showBanner(null, E('p', _('Failed to apply configuration: %s').format(err.message || err)), 0, 'error');
 		});
 	},
 
