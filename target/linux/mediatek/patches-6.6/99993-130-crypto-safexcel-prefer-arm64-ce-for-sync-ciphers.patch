@@ -1,0 +1,53 @@
+From: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+Subject: [PATCH] crypto: inside-secure: prefer synchronous ARMv8-CE/NEON for TLS/skcipher
+
+Lower EIP-197 safexcel base priority from 300 to 150 so synchronous
+ARMv8 Crypto Extensions (gcm-aes-ce/ccm-aes-ce 300, sha256-ce 200) and
+NEON (chacha20poly1305 250) win Kernel TLS (tls.ko) and synchronous
+AEAD/hash allocations without DMA/IRQ descriptor stalls, while keeping
+priority 300/301 on IPsec ESP AEAD suites (authenc, rfc4106, rfc4543,
+rfc4309, rfc7539esp) and staying above generic C fallbacks (100).
+
+Signed-off-by: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+---
+diff -ruN -U3 a/drivers/crypto/inside-secure/safexcel.c b/drivers/crypto/inside-secure/safexcel.c
+--- a/drivers/crypto/inside-secure/safexcel.c
++++ b/drivers/crypto/inside-secure/safexcel.c
+@@ -1288,10 +1288,22 @@
+ 			/* No, so don't register this ciphersuite */
+ 			continue;
+ 
+-		if (safexcel_algs[i]->type == SAFEXCEL_ALG_TYPE_SKCIPHER)
++		if (safexcel_algs[i]->type == SAFEXCEL_ALG_TYPE_SKCIPHER) {
+ 			ret = crypto_register_skcipher(&safexcel_algs[i]->alg.skcipher);
+-		else if (safexcel_algs[i]->type == SAFEXCEL_ALG_TYPE_AEAD)
++		} else if (safexcel_algs[i]->type == SAFEXCEL_ALG_TYPE_AEAD) {
++			const char *name = safexcel_algs[i]->alg.aead.base.cra_name;
++
++			if (!strncmp(name, "rfc7539esp(", 11))
++				safexcel_algs[i]->alg.aead.base.cra_priority =
++					SAFEXCEL_ESP_CRA_PRIORITY + 1;
++			else if (!strncmp(name, "authenc(", 8) ||
++				 !strncmp(name, "rfc4106(", 8) ||
++				 !strncmp(name, "rfc4543(", 8) ||
++				 !strncmp(name, "rfc4309(", 8))
++				safexcel_algs[i]->alg.aead.base.cra_priority =
++					SAFEXCEL_ESP_CRA_PRIORITY;
+ 			ret = crypto_register_aead(&safexcel_algs[i]->alg.aead);
++		}
+ 		else
+ 			ret = crypto_register_ahash(&safexcel_algs[i]->alg.ahash);
+ 
+diff -ruN -U3 a/drivers/crypto/inside-secure/safexcel.h b/drivers/crypto/inside-secure/safexcel.h
+--- a/drivers/crypto/inside-secure/safexcel.h
++++ b/drivers/crypto/inside-secure/safexcel.h
+@@ -743,7 +743,8 @@
+ };
+ 
+ /* Priority we use for advertising our algorithms */
+-#define SAFEXCEL_CRA_PRIORITY		300
++#define SAFEXCEL_CRA_PRIORITY		150
++#define SAFEXCEL_ESP_CRA_PRIORITY	300
+ 
+ /* System cache line size */
+ #define SYSTEM_CACHELINE_SIZE		64
