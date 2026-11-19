@@ -1,0 +1,102 @@
+msgid ""
+msgstr ""
+"Project-Id-Version: luci-app-Airpifanctrl\n"
+"Report-Msgid-Bugs-To: \n"
+"Language: zh_Hans\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=UTF-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+
+msgid "5G Modem Chip Temperature (AT^CHIPTEMP)"
+msgstr "5G 模组芯片温度 (AT^CHIPTEMP)"
+
+msgid "5G Modem Temperature"
+msgstr "5G模组温度"
+
+msgid "CPU Temperature"
+msgstr "CPU温度"
+
+msgid "CPU Thermal Zone (thermal_zone0)"
+msgstr "CPU 温度传感器 (thermal_zone0)"
+
+msgid "Configuration has been applied."
+msgstr "配置已成功应用。"
+
+msgid "Configure cooling fan operating mode and temperature sensor source."
+msgstr "配置散热风扇运行模式与温控传感器来源。"
+
+msgid "Cooling Policy Settings"
+msgstr "散热策略设置"
+
+msgid "Current Temperature"
+msgstr "当前温度"
+
+msgid "Failed to apply configuration: %s"
+msgstr "应用配置失败：%s"
+
+msgid "Fan Control"
+msgstr "风扇控制"
+
+msgid "Fan Speed"
+msgstr "风扇转速"
+
+msgid "Low Speed Mode"
+msgstr "低速模式"
+
+msgid "Low Speed Mode (PWM 128 / 50%)"
+msgstr "低速模式 (PWM 128 / 50%)"
+
+msgid "Normal Mode"
+msgstr "常规模式"
+
+msgid "Normal Mode (PWM 192 / 75%)"
+msgstr "常规模式 (PWM 192 / 75%)"
+
+msgid "Operating Mode"
+msgstr "运行模式"
+
+msgid "Realtime Status"
+msgstr "实时状态"
+
+msgid "Set fixed PWM value between 0 (0%) and 255 (100%)."
+msgstr "设置 0 (0%) 至 255 (100%) 之间的固定 PWM 占空比数值。"
+
+msgid "Silent Mode"
+msgstr "静音模式"
+
+msgid "Silent Mode (PWM 64 / 25%)"
+msgstr "静音模式 (PWM 64 / 25%)"
+
+msgid "Smart Thermal Mode"
+msgstr "智能温控模式"
+
+msgid "Smart Thermal Mode (Auto)"
+msgstr "智能温控模式 (自动)"
+
+msgid "Stepless Custom PWM Mode"
+msgstr "无极自定义调速模式"
+
+msgid "Stepless Mode"
+msgstr "无极调速模式"
+
+msgid "Stepless PWM Duty (0 - 255)"
+msgstr "无极调速占空比 (0 - 255)"
+
+msgid "Temperature Sensor Source"
+msgstr "温度传感器来源"
+
+msgid "Temperature Source"
+msgstr "温度源"
+
+msgid "Turbo Mode"
+msgstr "狂暴模式"
+
+msgid "Turbo Mode (PWM 255 / 100%)"
+msgstr "狂暴模式 (PWM 255 / 100%)"
+
+msgid "WPS button pressed: Restored to Smart Thermal Mode."
+msgstr "WPS 按键触发：已恢复智能温控模式。"
+
+msgid "WPS button pressed: Turbo cooling mode enabled."
+msgstr "WPS 按键触发：已开启狂暴散热模式。"

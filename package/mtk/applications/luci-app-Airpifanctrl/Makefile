@@ -3,12 +3,14 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-Airpifanctrl
-PKG_VERSION:=1.2
-PKG_RELEASE:=1
+PKG_VERSION:=2.0
+PKG_RELEASE:=5
 
-LUCI_TITLE:=LuCI for Airpifanctrl
+LUCI_TITLE:=LuCI JS Support for Airpi PWM Fan Control
 LUCI_PKGARCH:=all
+LUCI_DEPENDS:=+ucode +ucode-mod-fs +ucode-mod-ubus
+DEPENDS:=+ucode +ucode-mod-fs +ucode-mod-ubus
 
 include $(TOPDIR)/feeds/luci/luci.mk
 
-# $(eval $(call BuildPackage,luci-app-Airpifanctrl)
+# call BuildPackage - OpenWrt buildroot signature

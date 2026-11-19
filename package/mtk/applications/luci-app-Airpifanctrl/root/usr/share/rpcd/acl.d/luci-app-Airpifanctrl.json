@@ -1,0 +1,20 @@
+{
+	"luci-app-Airpifanctrl": {
+		"description": "Grant least-privilege ubus access for luci-app-Airpifanctrl",
+		"read": {
+			"ubus": {
+				"luci.airpifanctrl": [
+					"getStatus"
+				]
+			}
+		},
+		"write": {
+			"ubus": {
+				"luci.airpifanctrl": [
+					"setMode",
+					"setTempSource"
+				]
+			}
+		}
+	}
+}

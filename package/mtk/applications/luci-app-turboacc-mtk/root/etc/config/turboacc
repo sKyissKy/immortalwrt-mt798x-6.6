@@ -1,2 +1,3 @@
 config turboacc 'config'
+	option fastpath_mh_sw_fallback '1'
 

@@ -1,21 +1,19 @@
 #!/bin/sh /etc/rc.common
 START=99
+EXTRA_COMMANDS="worker_event"
 
-printMsg() {
-    local msg="$1"
-    logger -t "${PROGRAM}" "${msg}"
-} 
-
-restart(){                                                                                                       
-  /usr/bin/fancts.sh &
-  printMsg "Airpi风扇控制模块开始工作！"
-  cp /usr/bin/footer.htm /usr/lib/lua/luci/view/themes/argon/footer.htm
-  cp /usr/bin/wps /etc/rc.button/wps
+run_ctl() {
+	local script="/usr/libexec/rpcd/luci.airpifanctrl"
+	if [ -n "$FANCTRL_ROOT" ] && [ -f "${FANCTRL_ROOT}/usr/libexec/rpcd/luci.airpifanctrl" ]; then
+		script="${FANCTRL_ROOT}/usr/libexec/rpcd/luci.airpifanctrl"
+	fi
+	ucode "$script" ctl "$@" >/dev/null
 }
 
-start(){
-  /usr/bin/fancts.sh &
-  printMsg "Airpi风扇控制模块开始工作！"
-  cp /usr/bin/footer.htm /usr/lib/lua/luci/view/themes/argon/footer.htm
-  cp /usr/bin/wps /etc/rc.button/wps
-}
+start()        { run_ctl start; }
+stop()         { run_ctl stop; }
+restart()      { run_ctl restart; }
+reload()       { run_ctl restart; }
+worker_event() { run_ctl worker_event "$1"; }
+
+[ -z "$initscript" ] && [ -n "$1" ] && { "$@"; exit $?; }

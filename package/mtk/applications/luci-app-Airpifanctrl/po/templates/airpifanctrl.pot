@@ -1,0 +1,95 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8"
+
+msgid "5G Modem Chip Temperature (AT^CHIPTEMP)"
+msgstr ""
+
+msgid "5G Modem Temperature"
+msgstr ""
+
+msgid "CPU Temperature"
+msgstr ""
+
+msgid "CPU Thermal Zone (thermal_zone0)"
+msgstr ""
+
+msgid "Configuration has been applied."
+msgstr ""
+
+msgid "Configure cooling fan operating mode and temperature sensor source."
+msgstr ""
+
+msgid "Cooling Policy Settings"
+msgstr ""
+
+msgid "Current Temperature"
+msgstr ""
+
+msgid "Failed to apply configuration: %s"
+msgstr ""
+
+msgid "Fan Control"
+msgstr ""
+
+msgid "Fan Speed"
+msgstr ""
+
+msgid "Low Speed Mode"
+msgstr ""
+
+msgid "Low Speed Mode (PWM 128 / 50%)"
+msgstr ""
+
+msgid "Normal Mode"
+msgstr ""
+
+msgid "Normal Mode (PWM 192 / 75%)"
+msgstr ""
+
+msgid "Operating Mode"
+msgstr ""
+
+msgid "Realtime Status"
+msgstr ""
+
+msgid "Set fixed PWM value between 0 (0%) and 255 (100%)."
+msgstr ""
+
+msgid "Silent Mode"
+msgstr ""
+
+msgid "Silent Mode (PWM 64 / 25%)"
+msgstr ""
+
+msgid "Smart Thermal Mode"
+msgstr ""
+
+msgid "Smart Thermal Mode (Auto)"
+msgstr ""
+
+msgid "Stepless Custom PWM Mode"
+msgstr ""
+
+msgid "Stepless Mode"
+msgstr ""
+
+msgid "Stepless PWM Duty (0 - 255)"
+msgstr ""
+
+msgid "Temperature Sensor Source"
+msgstr ""
+
+msgid "Temperature Source"
+msgstr ""
+
+msgid "Turbo Mode"
+msgstr ""
+
+msgid "Turbo Mode (PWM 255 / 100%)"
+msgstr ""
+
+msgid "WPS button pressed: Restored to Smart Thermal Mode."
+msgstr ""
+
+msgid "WPS button pressed: Turbo cooling mode enabled."
+msgstr ""

@@ -10,10 +10,24 @@ USE_PROCD=1
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
+resolve_hnat_path() {
+	if [ -n "${TURBOACC_HNAT_PATH:-}" ]; then
+		printf '%s\n' "$TURBOACC_HNAT_PATH"
+	elif [ -d "/sys/kernel/debug/hnat" ]; then
+		printf '/sys/kernel/debug/hnat\n'
+	elif [ -d "/sys/kernel/debug/mtk_ppe" ]; then
+		printf '/sys/kernel/debug/mtk_ppe\n'
+	else
+		printf '/sys/kernel/debug/hnat\n'
+	fi
+}
+
 module_loaded() {
 	local module
+	local sys_mod="${TURBOACC_SYS_MODULE:-/sys/module}"
 	for module in "$@"; do
-		[ -d "/sys/module/$module" ] && return 0
+		[ -d "$sys_mod/$module" ] && return 0
+		lsmod 2>/dev/null | grep -q "^${module} " && return 0
 	done
 	return 1
 }
@@ -22,6 +36,16 @@ try_modprobe() {
 	local module
 	for module in "$@"; do
 		modprobe "$module" 2>/dev/null && return 0
+	done
+	return 1
+}
+
+ensure_kmod_loaded() {
+	local mod
+	for mod in "$@"; do
+		if module_loaded "$mod" || try_modprobe "$mod"; then
+			return 0
+		fi
 	done
 	return 1
 }
@@ -35,18 +59,21 @@ load_hnat_module() {
 }
 
 disable_hnat_runtime() {
-	local hnat_path="${1:-/sys/kernel/debug/hnat}"
+	local hnat_path="${1:-$(resolve_hnat_path)}"
 
 	[ -w "$hnat_path/hook_toggle" ] && echo "0" >"$hnat_path/hook_toggle" 2>/dev/null
 	[ -w "$hnat_path/hnat_setting" ] && echo "8 0" >"$hnat_path/hnat_setting" 2>/dev/null
 }
 
 wait_hnat_debugfs() {
-	local hnat_path="${1:-/sys/kernel/debug/hnat}"
+	local hnat_path="${1:-$(resolve_hnat_path)}"
 	local i
+
+	[ -n "${TURBOACC_HNAT_PATH:-}" ] && [ -d "$hnat_path" ] && return 0
 
 	for i in 1 2 3 4 5 6 7 8 9 10; do
 		[ -d "$hnat_path" ] && return 0
+		[ -d "/sys/kernel/debug/mtk_ppe" ] && return 0
 		sleep 0.2
 	done
 
@@ -55,6 +82,7 @@ wait_hnat_debugfs() {
 
 # busybox-safe debugfs mount check; avoids `mountpoint -q` which may be absent
 ensure_debugfs() {
+	[ -n "${TURBOACC_HNAT_PATH:-}" ] && return 0
 	grep -q ' /sys/kernel/debug debugfs ' /proc/mounts 2>/dev/null && return 0
 	mkdir -p /sys/kernel/debug 2>/dev/null
 	mount -t debugfs none /sys/kernel/debug 2>/dev/null && return 0
@@ -67,7 +95,10 @@ hwrite() {
 	local path="$1"
 	local value="$2"
 	[ -n "$path" ] && [ -n "$value" ] || return 1
-	[ -w "$path" ] && echo "$value" >"$path" 2>/dev/null && return 0
+	if [ -w "$path" ] && echo "$value" >"$path" 2>/dev/null; then
+		[ -n "${TURBOACC_HWRITE_LOG:-}" ] && printf '%s\n' "$value" >>"$TURBOACC_HWRITE_LOG" 2>/dev/null
+		return 0
+	fi
 	return 1
 }
 
@@ -79,8 +110,38 @@ _uci_bool_enabled() {
 	return 1
 }
 
+sync_fw4_sw_flow_offload() {
+	local want_sw="$1"
+	local uci_bin="${TURBOACC_UCI:-uci}"
+	local fw_init="${TURBOACC_FW_INIT:-/etc/init.d/firewall}"
+	local cur_sw cur_hw changed=0
+
+	command -v "$uci_bin" >/dev/null 2>&1 || return 0
+
+	cur_sw="$("$uci_bin" -q get firewall.@defaults[0].flow_offloading 2>/dev/null)"
+	cur_hw="$("$uci_bin" -q get firewall.@defaults[0].flow_offloading_hw 2>/dev/null)"
+
+	if [ "$cur_sw" != "$want_sw" ]; then
+		"$uci_bin" -q set "firewall.@defaults[0].flow_offloading=$want_sw" >/dev/null 2>&1 && changed=1
+	fi
+	if [ "$cur_hw" != "0" ]; then
+		"$uci_bin" -q set "firewall.@defaults[0].flow_offloading_hw=0" >/dev/null 2>&1 && changed=1
+	fi
+
+	if [ "$changed" -eq 1 ]; then
+		"$uci_bin" -q commit firewall >/dev/null 2>&1
+		if [ -x "$fw_init" ]; then
+			"$fw_init" reload >/dev/null 2>&1 || true
+		fi
+	fi
+	return 0
+}
+
 default_fullcone_mode() {
-	if [ -e "/lib/modules/$(uname -r)/xt_FULLCONENAT.ko" ]; then
+	local kver
+	kver="$(uname -r)"
+	if [ -e "/lib/modules/$kver/xt_FULLCONENAT.ko" ] || [ -e "/lib/modules/$kver/nft_fullcone.ko" ] || \
+	   [ -d "/sys/module/xt_FULLCONENAT" ] || [ -d "/sys/module/nft_fullcone" ]; then
 		printf '1\n'
 	else
 		printf '2\n'
@@ -91,12 +152,26 @@ default_fullcone_mode() {
 # procd lifecycle
 # ---------------------------------------------------------------------------
 stop_service() {
-	local hnat_path="/sys/kernel/debug/hnat"
+	local hnat_path
+	local fc_sysfs="${TURBOACC_FAST_CLASSIFIER_SYSFS:-/sys/fast_classifier}"
 
 	ensure_debugfs
+	hnat_path="$(resolve_hnat_path)"
 
 	# disable HNAT hook if still accessible
 	disable_hnat_runtime "$hnat_path"
+	sync_fw4_sw_flow_offload "0"
+
+	# clean up fast_classifier / shortcut_fe_cm if loaded
+	if module_loaded "fast_classifier"; then
+		[ -w "$fc_sysfs/skip_to_bridge_ingress" ] && \
+			echo "0" >"$fc_sysfs/skip_to_bridge_ingress" 2>/dev/null
+		rm -f /dev/sfe_ipv6
+		rmmod "fast_classifier" 2>/dev/null
+	fi
+	if module_loaded "shortcut_fe_cm"; then
+		rmmod "shortcut_fe_cm" 2>/dev/null
+	fi
 
 	# restore fullcone to a safe default
 	if [ -w "/proc/sys/net/netfilter/nf_conntrack_nat_mode" ]; then
@@ -109,91 +184,185 @@ stop_service() {
 	logger -t turboacc "stopped"
 }
 
+inital_conf() {
+	config_get fastpath "config" "fastpath" "none"
+	[ -n "$fastpath" ] || fastpath="none"
+
+	config_get_bool fastpath_mh_eth_hnat "config" "fastpath_mh_eth_hnat" "1"
+	local fastpath_mh_hnat_override
+	config_get fastpath_mh_hnat_override "config" "fastpath_mh_hnat" ""
+	if [ -n "$fastpath_mh_hnat_override" ]; then
+		config_get_bool fastpath_mh_eth_hnat "config" "fastpath_mh_hnat" "$fastpath_mh_eth_hnat"
+	fi
+}
+
 start_service() {
 	config_load "turboacc"
 
 	local fastpath
-	local hnat_path="/sys/kernel/debug/hnat"
-	local fastpath_mh_eth_hnat="0"
-	config_get fastpath "config" "fastpath"
-	[ -n "$fastpath" ] || fastpath="none"
-
-	# ---------- pre-clean conflicting engines ----------
-	if [ "$fastpath" != "fast_classifier" ] && lsmod | grep -q "fast_classifier"; then
-		echo "0" >"/sys/fast_classifier/skip_to_bridge_ingress" 2>/dev/null
-		rm -f "/dev/sfe_ipv6"
-		rmmod "fast_classifier" 2>/dev/null
-	fi
-
-	if [ "$fastpath" != "shortcut_fe_cm" ] && lsmod | grep -q "shortcut_fe_cm"; then
-		rmmod "shortcut_fe_cm" 2>/dev/null
-	fi
+	local hnat_path
+	local fastpath_mh_eth_hnat="1"
+	inital_conf
 
 	# ---------- debugfs (required for HNAT knobs) ----------
 	ensure_debugfs
-
-	if [ "$fastpath" != "mediatek_hnat" ] && hnat_module_loaded && [ -w "$hnat_path/hook_toggle" ]; then
-		disable_hnat_runtime "$hnat_path"
-	fi
+	hnat_path="$(resolve_hnat_path)"
 
 	# ---------- engine activation ----------
 	case "$fastpath" in
 	"fast_classifier")
-		local fastpath_fc_br fastpath_fc_ipv6
+		local fastpath_fc_br fastpath_fc_ipv6 fastpath_fc_pkts
 		config_get_bool fastpath_fc_br "config" "fastpath_fc_br" "0"
 		config_get_bool fastpath_fc_ipv6 "config" "fastpath_fc_ipv6" "0"
+		config_get fastpath_fc_pkts "config" "fastpath_fc_pkts" ""
 
-		lsmod | grep -q "fast_classifier" || modprobe "fast_classifier" 2>/dev/null
-		echo "$fastpath_fc_br" >"/sys/fast_classifier/skip_to_bridge_ingress" 2>/dev/null
+		if ! ensure_kmod_loaded "fast_classifier" "fast-classifier"; then
+			logger -t turboacc "ERROR: fast_classifier module is not available; keeping existing HNAT state"
+			return 1
+		fi
+
+		if module_loaded "shortcut_fe_cm"; then
+			rmmod "shortcut_fe_cm" 2>/dev/null
+		fi
+
+		if hnat_module_loaded && [ -w "$hnat_path/hook_toggle" ]; then
+			disable_hnat_runtime "$hnat_path"
+		fi
+
+		local fc_sysfs="${TURBOACC_FAST_CLASSIFIER_SYSFS:-/sys/fast_classifier}"
+		if [ -d "$fc_sysfs" ]; then
+			if [ -w "$fc_sysfs/skip_to_bridge_ingress" ]; then
+				echo "$fastpath_fc_br" >"$fc_sysfs/skip_to_bridge_ingress" 2>/dev/null || {
+					logger -t turboacc "ERROR: failed to write $fc_sysfs/skip_to_bridge_ingress"
+					return 1
+				}
+			fi
+			if [ -n "$fastpath_fc_pkts" ] && [ -w "$fc_sysfs/offload_at_pkts" ]; then
+				echo "$fastpath_fc_pkts" >"$fc_sysfs/offload_at_pkts" 2>/dev/null || {
+					logger -t turboacc "ERROR: failed to write $fc_sysfs/offload_at_pkts"
+					return 1
+				}
+			fi
+		fi
+
 		if [ "$fastpath_fc_ipv6" -eq "1" ]; then
 			[ -e "/dev/sfe_ipv6" ] || mknod "/dev/sfe_ipv6" c "$(cat "/sys/sfe_ipv6/debug_dev" 2>/dev/null)" 0 2>/dev/null
 		else
 			[ ! -e "/dev/sfe_ipv6" ] || rm -f "/dev/sfe_ipv6"
 		fi
+		sync_fw4_sw_flow_offload "0"
 		logger -t turboacc "engine=fast_classifier br=$fastpath_fc_br v6=$fastpath_fc_ipv6"
 		;;
 	"shortcut_fe_cm")
-		lsmod | grep -q "shortcut_fe_cm" || modprobe "shortcut_fe_cm" 2>/dev/null
+		if ! ensure_kmod_loaded "shortcut_fe_cm" "shortcut-fe-cm"; then
+			logger -t turboacc "ERROR: shortcut_fe_cm module is not available; keeping existing HNAT state"
+			return 1
+		fi
+
+		local fc_sysfs="${TURBOACC_FAST_CLASSIFIER_SYSFS:-/sys/fast_classifier}"
+		if module_loaded "fast_classifier"; then
+			echo "0" >"$fc_sysfs/skip_to_bridge_ingress" 2>/dev/null
+			rm -f "/dev/sfe_ipv6"
+			rmmod "fast_classifier" 2>/dev/null
+		fi
+
+		if hnat_module_loaded && [ -w "$hnat_path/hook_toggle" ]; then
+			disable_hnat_runtime "$hnat_path"
+		fi
+
+		sync_fw4_sw_flow_offload "0"
 		logger -t turboacc "engine=shortcut_fe_cm"
 		;;
 	"mediatek_hnat")
-		config_get_bool fastpath_mh_eth_hnat "config" "fastpath_mh_eth_hnat" "1"
+		local fc_sysfs="${TURBOACC_FAST_CLASSIFIER_SYSFS:-/sys/fast_classifier}"
+		if module_loaded "fast_classifier"; then
+			echo "0" >"$fc_sysfs/skip_to_bridge_ingress" 2>/dev/null
+			rm -f "/dev/sfe_ipv6"
+			rmmod "fast_classifier" 2>/dev/null
+		fi
+		if module_loaded "shortcut_fe_cm"; then
+			rmmod "shortcut_fe_cm" 2>/dev/null
+		fi
 
-		if ! load_hnat_module; then
-			logger -t turboacc "ERROR: cannot load mtkhnat/mediatek_hnat module"
+		if ! hnat_module_loaded; then
+			if ! (try_modprobe "mtkhnat" || try_modprobe "mediatek_hnat"); then
+				logger -t turboacc "ERROR: cannot load mtkhnat/mediatek_hnat module"
+				return 1
+			fi
 		fi
 
 		ensure_debugfs
 		wait_hnat_debugfs "$hnat_path" || \
 			logger -t turboacc "WARNING: $hnat_path not present after loading HNAT module"
+		hnat_path="$(resolve_hnat_path)"
 
-		# hook_toggle: 1=enable HNAT for Ethernet, 0=disable
-		if [ -w "$hnat_path/hook_toggle" ]; then
-			echo "$fastpath_mh_eth_hnat" >"$hnat_path/hook_toggle" 2>/dev/null || \
-				logger -t turboacc "WARNING: failed to write hook_toggle=$fastpath_mh_eth_hnat"
-		else
-			logger -t turboacc "WARNING: $hnat_path/hook_toggle not writable (debugfs mounted? module loaded?)"
+		# hook_toggle: 1=enable global HNAT & WHNAT hooks, 0=disable
+		if [ ! -w "$hnat_path/hook_toggle" ]; then
+			logger -t turboacc "ERROR: MediaTek HNAT debugfs hook_toggle is not available"
+			return 1
+		fi
+
+		if ! echo "$fastpath_mh_eth_hnat" >"$hnat_path/hook_toggle" 2>/dev/null; then
+			logger -t turboacc "ERROR: failed to write hook_toggle=$fastpath_mh_eth_hnat"
+			return 1
 		fi
 
 		if _uci_bool_enabled "$fastpath_mh_eth_hnat"; then
-			local fastpath_mh_eth_hnat_v6 fastpath_mh_eth_hnat_bind_rate
+			local fastpath_mh_eth_hnat_v6 fastpath_mh_eth_hnat_bind_rate fastpath_mh_sw_fallback
 
 			config_get_bool fastpath_mh_eth_hnat_v6 "config" "fastpath_mh_eth_hnat_v6" "1"
 			config_get fastpath_mh_eth_hnat_bind_rate "config" "fastpath_mh_eth_hnat_bind_rate" "30"
+			config_get_bool fastpath_mh_sw_fallback "config" "fastpath_mh_sw_fallback" "1"
 
 			# hnat_setting: cmd 8 = IPv6 HNAT toggle, cmd 11 = bind rate threshold
-			hwrite "$hnat_path/hnat_setting" "8 $fastpath_mh_eth_hnat_v6" || \
-				logger -t turboacc "WARNING: failed to write hnat_setting (IPv6)"
-			hwrite "$hnat_path/hnat_setting" "11 $fastpath_mh_eth_hnat_bind_rate" || \
-				logger -t turboacc "WARNING: failed to write hnat_setting (bind_rate)"
+			if [ -w "$hnat_path/hnat_setting" ]; then
+				hwrite "$hnat_path/hnat_setting" "8 $fastpath_mh_eth_hnat_v6" || {
+					logger -t turboacc "ERROR: failed to write hnat_setting (IPv6)"
+					return 1
+				}
+				hwrite "$hnat_path/hnat_setting" "11 $fastpath_mh_eth_hnat_bind_rate" || {
+					logger -t turboacc "ERROR: failed to write hnat_setting (bind_rate)"
+					return 1
+				}
+			fi
 
-			logger -t turboacc "engine=mediatek_hnat eth=$fastpath_mh_eth_hnat v6=$fastpath_mh_eth_hnat_v6 bind_rate=$fastpath_mh_eth_hnat_bind_rate"
+			if _uci_bool_enabled "$fastpath_mh_sw_fallback"; then
+				sync_fw4_sw_flow_offload "1"
+			else
+				sync_fw4_sw_flow_offload "0"
+			fi
+
+			logger -t turboacc "engine=mediatek_hnat eth=$fastpath_mh_eth_hnat v6=$fastpath_mh_eth_hnat_v6 bind_rate=$fastpath_mh_eth_hnat_bind_rate sw_fallback=$fastpath_mh_sw_fallback"
 		else
-			logger -t turboacc "engine=mediatek_hnat eth=0 (Ethernet HNAT disabled by config)"
+			if [ -w "$hnat_path/hnat_setting" ]; then
+				hwrite "$hnat_path/hnat_setting" "8 0" || {
+					logger -t turboacc "ERROR: failed to write hnat_setting (IPv6 disable)"
+					return 1
+				}
+			fi
+			sync_fw4_sw_flow_offload "0"
+			logger -t turboacc "engine=mediatek_hnat eth=0 (Global HNAT/WHNAT hooks disabled by config)"
 		fi
 		;;
-	*)
+	"none"|"disabled"|"")
+		local fc_sysfs="${TURBOACC_FAST_CLASSIFIER_SYSFS:-/sys/fast_classifier}"
+		if module_loaded "fast_classifier"; then
+			echo "0" >"$fc_sysfs/skip_to_bridge_ingress" 2>/dev/null
+			rm -f "/dev/sfe_ipv6"
+			rmmod "fast_classifier" 2>/dev/null
+		fi
+		if module_loaded "shortcut_fe_cm"; then
+			rmmod "shortcut_fe_cm" 2>/dev/null
+		fi
+		if hnat_module_loaded && [ -w "$hnat_path/hook_toggle" ]; then
+			disable_hnat_runtime "$hnat_path"
+		fi
+		sync_fw4_sw_flow_offload "0"
 		logger -t turboacc "engine=none (no fastpath selected)"
+		;;
+	*)
+		logger -t turboacc "ERROR: unsupported fastpath '$fastpath'; keeping existing HNAT state"
+		return 1
 		;;
 	esac
 
@@ -219,9 +388,7 @@ start_service() {
 }
 
 reload_service() {
-	stop_service
-	sleep 1
-	start_service
+	start_service "$@"
 }
 
 service_triggers() {

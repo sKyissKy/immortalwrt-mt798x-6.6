@@ -14,12 +14,13 @@ has_module_file() {
 	return 1
 }
 
-if has_module_file "mtkhnat" "mediatek_hnat"; then
+if has_module_file "mtkhnat" "mediatek_hnat" || [ -d "/sys/kernel/debug/hnat" ] || [ -d "/sys/kernel/debug/mtk_ppe" ]; then
 	uci -q set "turboacc.config.fastpath"="mediatek_hnat"
 	uci -q set "turboacc.config.fastpath_mh_eth_hnat"="1"
 	uci -q set "turboacc.config.fastpath_mh_eth_hnat_v6"="1"
 	uci -q set "turboacc.config.fastpath_mh_eth_hnat_bind_rate"="30"
-elif has_module_file "fast-classifier"; then
+	uci -q set "turboacc.config.fastpath_mh_sw_fallback"="1"
+elif has_module_file "fast-classifier" "fast_classifier"; then
 	uci -q set "turboacc.config.fastpath"="fast_classifier"
 	uci -q set "turboacc.config.fastpath_fc_br"="1"
 	if [ -d "/proc/sys/net/ipv6" ]; then
@@ -27,13 +28,13 @@ elif has_module_file "fast-classifier"; then
 	else
 		uci -q set "turboacc.config.fastpath_fc_ipv6"="0"
 	fi
-elif has_module_file "shortcut-fe-cm"; then
+elif has_module_file "shortcut-fe-cm" "shortcut_fe_cm"; then
 	uci -q set "turboacc.config.fastpath"="shortcut_fe_cm"
 else
 	uci -q set "turboacc.config.fastpath"="none"
 fi
 
-if has_module_file "xt_FULLCONENAT"; then
+if has_module_file "xt_FULLCONENAT" "nft_fullcone"; then
 	uci -q set "turboacc.config.fullcone"="1"
 else
 	uci -q set "turboacc.config.fullcone"="2"

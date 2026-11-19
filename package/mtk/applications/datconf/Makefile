@@ -17,6 +17,8 @@ PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)
 
 PKG_MAINTAINER:=Weijie Gao <weijie.gao@mediatek.com>
 
+PKG_CONFIG_DEPENDS := CONFIG_PACKAGE_datconf-lua
+
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/cmake.mk
 include $(INCLUDE_DIR)/kernel.mk
@@ -54,7 +56,8 @@ TARGET_CFLAGS += -I$(STAGING_DIR)/usr/include
 TARGET_LDFLAGS += -L$(STAGING_DIR)/usr/lib
 
 CMAKE_OPTIONS = \
-        -DLUAPATH=/usr/lib/lua
+        -DLUAPATH=/usr/lib/lua \
+        -DBUILD_LUA=$(if $(CONFIG_PACKAGE_datconf-lua),ON,OFF)
 
 
 define Package/libkvcutil/install

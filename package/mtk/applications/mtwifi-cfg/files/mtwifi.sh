@@ -7,10 +7,11 @@ append DRIVERS "mtwifi"
 
 detect_mtwifi() {
 	local idx ifname
-	local band htmode htbsscoex ssid dbdc_main
+	local band channel htmode htbsscoex ssid dbdc_main
 	if [ -d "/sys/module/mt_wifi" ]; then
 		dev_list="$(l1util list)"
 		for dev in $dev_list; do
+			channel=""
 			config_get type ${dev} type
 			[ "$type" = "mtwifi" ] || {
 				ifname="$(l1util get ${dev} main_ifname)"
@@ -37,6 +38,7 @@ detect_mtwifi() {
 					htmode="EHT160"
 					htbsscoex="0"
 					ssid="ImmortalWrt-6G"
+					channel="auto"
 				fi
 
 				uci -q batch <<-EOF
