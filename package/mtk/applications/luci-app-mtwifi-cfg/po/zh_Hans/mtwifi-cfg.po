@@ -151,5 +151,8 @@ msgstr "无法添加更多活动 AP 网络"
 msgid "WPA3 does not support TKIP cipher."
 msgstr "WPA3 不支持 TKIP 加密算法。"
 
+msgid "Wireless"
+msgstr "无线"
+
 msgid "extended sleep mode for stations"
 msgstr "工作站扩展睡眠模式"

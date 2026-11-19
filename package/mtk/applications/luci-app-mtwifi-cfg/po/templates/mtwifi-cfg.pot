@@ -151,5 +151,8 @@ msgstr ""
 msgid "WPA3 does not support TKIP cipher."
 msgstr ""
 
+msgid "Wireless"
+msgstr ""
+
 msgid "extended sleep mode for stations"
 msgstr ""

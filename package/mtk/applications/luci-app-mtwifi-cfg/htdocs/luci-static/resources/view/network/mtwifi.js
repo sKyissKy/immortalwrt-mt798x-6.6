@@ -660,11 +660,21 @@ var CBIWifiFrequencyValue = form.Value.extend({
 	},
 
 	write: function(section_id, value) {
-		if (value[0] && value[1] && value[2])
-		{
-			uci.set('wireless', section_id, 'htmode', value[0]);
-			uci.set('wireless', section_id, 'channel', value[2]);
+		if (is_mtwifi_device(section_id)) {
+			if (value[0] && value[1] && value[2]) {
+				uci.set('wireless', section_id, 'htmode', value[0]);
+				uci.set('wireless', section_id, 'channel', value[2]);
+			}
+			return;
 		}
+
+		uci.set('wireless', section_id, 'htmode', value[0] || null);
+
+		this.useBandOption ?
+			uci.set('wireless', section_id, 'band', value[1]) :
+			uci.set('wireless', section_id, 'hwmode', (value[1] == '2g') ? '11g' : '11a');
+
+		uci.set('wireless', section_id, 'channel', value[2]);
 	}
 });
 
@@ -864,7 +874,7 @@ return view.extend({
 		var wifiIfaces = uci.sections('wireless', 'wifi-iface');
 
 		for (var i = 0; i < wifiIfaces.length; i++)
-			if (wifiIfaces[i]['.anonymous'] && is_mtwifi_device(wifiIfaces[i].device))
+			if (wifiIfaces[i]['.anonymous'])
 				return true;
 
 		return false;
@@ -889,7 +899,7 @@ return view.extend({
 		    tasks = [];
 
 		for (var i = 0; i < wifiIfaces.length; i++) {
-			if (!wifiIfaces[i]['.anonymous'] || !is_mtwifi_device(wifiIfaces[i].device))
+			if (!wifiIfaces[i]['.anonymous'])
 				continue;
 
 			var new_name = next_free_sid(id_offset);
@@ -928,8 +938,8 @@ return view.extend({
 
 		s.load = function() {
 			return network.getWifiDevices().then(L.bind(function(radios) {
-				this.radios = radios.filter(is_mtwifi_radio).sort(function(a, b) {
-					return a.getName() > b.getName();
+				this.radios = radios.sort(function(a, b) {
+					return L.naturalCompare(a.getName(), b.getName());
 				});
 
 				var tasks = [];
@@ -2615,7 +2625,6 @@ return view.extend({
 
 				return Promise.all(tasks)
 					.then(L.bind(function(hosts_radios) {
-						hosts_radios[1] = hosts_radios[1].filter(is_mtwifi_radio);
 						var tasks = [];
 
 						for (var i = 0; i < hosts_radios[1].length; i++)
