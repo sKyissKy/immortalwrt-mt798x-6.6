@@ -37,13 +37,19 @@ restore_kernel_thermal() {
         if [ -z "$pwm_node" ]; then
             pwm_node=$(find_pwm 2>/dev/null || true)
         fi
+        if [ -z "$thermal_mode" ] || ! write_verified_file "$thermal_mode" "disabled"; then
+            rc=1
+        fi
+        if [ -n "$pwm_node" ] && [ -w "${pwm_node}_enable" ]; then
+            write_verified_file "${pwm_node}_enable" "1" || rc=1
+        fi
         if [ -z "$pwm_node" ] || ! write_verified_file "$pwm_node" "255"; then
             rc=1
         fi
-    fi
-
-    if [ -z "$thermal_mode" ] || ! write_verified_file "$thermal_mode" "enabled"; then
-        rc=1
+    else
+        if [ -z "$thermal_mode" ] || ! write_verified_file "$thermal_mode" "enabled"; then
+            rc=1
+        fi
     fi
 
     if [ "$rc" -ne 0 ]; then
@@ -319,6 +325,21 @@ pwm_node=$(find_pwm) || { restore_kernel_thermal 0; exit 1; }
 # Step 2: Validate temperature source
 init_temp=$(read_valid_temp) || { restore_kernel_thermal 1; exit 1; }
 
+compute_smart_pwm() {
+    _temp="$1"
+    _prev="${2:-0}"
+
+    if [ "$_temp" -ge 68000 ] 2>/dev/null || { [ "$_prev" -eq 255 ] 2>/dev/null && [ "$_temp" -ge 65000 ] 2>/dev/null; }; then
+        printf '255\n'
+    elif [ "$_temp" -ge 56000 ] 2>/dev/null || { [ "$_prev" -ge 192 ] 2>/dev/null && [ "$_temp" -ge 53000 ] 2>/dev/null; }; then
+        printf '192\n'
+    elif [ "$_temp" -ge 46000 ] 2>/dev/null || { [ "$_prev" -ge 144 ] 2>/dev/null && [ "$_temp" -ge 43000 ] 2>/dev/null; }; then
+        printf '144\n'
+    else
+        printf '104\n'
+    fi
+}
+
 # Step 3: Read fanvall and compute init_pwm
 fanvall=$(tr -d '\r\n ' < "${FANCTRL_ROOT}/etc/fanvall" 2>/dev/null || echo 4)
 case "$fanvall" in
@@ -339,15 +360,7 @@ case "$fanvall" in
         init_pwm="$saved_pwm"
         ;;
     *)
-        if [ "$init_temp" -gt 85000 ]; then
-            init_pwm=255
-        elif [ "$init_temp" -gt 60000 ]; then
-            init_pwm=192
-        elif [ "$init_temp" -gt 50000 ]; then
-            init_pwm=128
-        else
-            init_pwm=64
-        fi
+        init_pwm=$(compute_smart_pwm "$init_temp" 0)
         ;;
 esac
 
@@ -377,17 +390,11 @@ esac
 
 # Step 9: Smart mode loop
 SMART_LOOP_ACTIVE=1
+cur_pwm="$init_pwm"
 while true; do
     temp=$(read_valid_temp) || { restore_kernel_thermal 1; exit 1; }
-    if [ "$temp" -gt 85000 ]; then
-        target_pwm=255
-    elif [ "$temp" -gt 60000 ]; then
-        target_pwm=192
-    elif [ "$temp" -gt 50000 ]; then
-        target_pwm=128
-    else
-        target_pwm=64
-    fi
+    target_pwm=$(compute_smart_pwm "$temp" "$cur_pwm")
     write_verified_file "$pwm_node" "$target_pwm" && write_verified_file "$fanspeed_conf" "$target_pwm" || { restore_kernel_thermal 1; exit 1; }
+    cur_pwm="$target_pwm"
     sleep "$sleep_sec"
 done

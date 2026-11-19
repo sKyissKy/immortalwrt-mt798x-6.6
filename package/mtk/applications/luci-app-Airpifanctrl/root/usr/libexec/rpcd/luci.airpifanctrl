@@ -1054,6 +1054,16 @@ function restore_snapshot_locked(snap) {
 	return true;
 }
 
+function latch_emergency_full_speed_locked(pwm_node) {
+	if (!pwm_node)
+		pwm_node = find_pwm();
+	let ok_tm = write_verified('/sys/class/thermal/thermal_zone0/mode', 'disabled\n');
+	if (pwm_node && fs.access(pwm_node + '_enable', 'w'))
+		write_verified(pwm_node + '_enable', '1\n');
+	let ok_pwm = pwm_node ? write_verified(pwm_node, '255\n') : false;
+	return { ok_tm: ok_tm, ok_pwm: ok_pwm };
+}
+
 function recover_uncommitted_journal_locked() {
 	let jpath = rpath(JOURNAL_PATH);
 	if (path_absent_verified(jpath))
@@ -1072,13 +1082,10 @@ function recover_uncommitted_journal_locked() {
 	}
 
 	if (!snap || type(snap) != 'object') {
-		// Corrupted or unreadable journal JSON: force fail-safe pwm=255 + thermal_zone0/mode=enabled
+		// Corrupted or unreadable journal JSON: force fail-safe manual full-speed pwm=255
 		if (!stop_worker_locked())
 			return recovery_failed_locked('worker_stop_timeout');
-		let pwm_node = find_pwm();
-		if (pwm_node)
-			write_verified(pwm_node, '255\n');
-		write_verified('/sys/class/thermal/thermal_zone0/mode', 'enabled\n');
+		latch_emergency_full_speed_locked(null);
 		return recovery_failed_locked(null);
 	}
 
@@ -1306,10 +1313,7 @@ function start_service_locked() {
 
 		let mres = apply_manual_locked(mode_info.mode, target_pwm);
 		if (!mres.ok) {
-			let pwm_node = find_pwm();
-			if (pwm_node)
-				write_verified(pwm_node, '255\n');
-			write_verified('/sys/class/thermal/thermal_zone0/mode', 'enabled\n');
+			latch_emergency_full_speed_locked(null);
 			unlink_safe('/var/run/cooling_control.ready');
 			return { code: 1, error: mres.error };
 		}
@@ -1331,24 +1335,20 @@ function start_service_locked() {
 	let tm_path = rpath('/sys/class/thermal/thermal_zone0/mode');
 	let tm_ok = fs.access(tm_path, 'r') && fs.access(tm_path, 'w');
 	if (!pwm_node || !tm_ok || parse_cpu_temp() <= 0) {
-		if (pwm_node)
-			write_verified(pwm_node, '255\n');
-		if (tm_ok)
-			write_verified('/sys/class/thermal/thermal_zone0/mode', 'enabled\n');
+		latch_emergency_full_speed_locked(pwm_node);
 		return { code: 1, error: 'Hardware or thermal sensor validation failed' };
 	}
 
 	let gen = new_generation('smart');
 	if (!start_smart_locked(gen)) {
-		write_verified('/sys/class/thermal/thermal_zone0/mode', 'enabled\n');
+		latch_emergency_full_speed_locked(pwm_node);
 		return { code: 1, error: 'Failed to register smart fan control service with procd' };
 	}
 
 	let st = wait_ready_locked(gen, pwm_node);
 	if (!st.ready) {
 		stop_worker_locked();
-		write_verified(pwm_node, '255\n');
-		write_verified('/sys/class/thermal/thermal_zone0/mode', 'enabled\n');
+		latch_emergency_full_speed_locked(pwm_node);
 		return { code: 1, error: 'Smart fan control worker failed readiness verification' };
 	}
 
@@ -1417,9 +1417,9 @@ function worker_event_locked(ev) {
 	    (st.ok && st.present && st.running && st.pid != null && is_confirmed_fancts_pid(st.pid)))
 		return { code: 0 };
 
-	let pwm_node = find_pwm();
-	let ok_pwm = pwm_node ? write_verified(pwm_node, '255\n') : false;
-	let ok_tm = write_verified('/sys/class/thermal/thermal_zone0/mode', 'enabled\n');
+	let em = latch_emergency_full_speed_locked(null);
+	let ok_pwm = em.ok_pwm;
+	let ok_tm = em.ok_tm;
 
 	if (!st.ok) {
 		let err_code = (!ok_pwm || !ok_tm) ? 'thermal_restore_failed' : 'procd_query_failed';
