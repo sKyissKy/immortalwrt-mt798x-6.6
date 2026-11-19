@@ -1,0 +1,26 @@
+From: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+Subject: [PATCH] qmi_wwan_q: enable QMAPv5 DL checksum offload validation
+
+Mark QMAPv5 downlink packets as CHECKSUM_UNNECESSARY when the modem sets
+RMNET_MAP_HEADER_TYPE_CSUM_OFFLOAD and csum_valid_required without a
+chained next_hdr extension.
+
+Signed-off-by: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+---
+--- a/qmi_wwan_q.c
++++ b/qmi_wwan_q.c
+@@ -1892,11 +1892,10 @@
+ 		if(skip_nss)
+ 			qmap_skb->cb[0] = 1;
+ 
+-		if (ul_header && ul_header->header_type == RMNET_MAP_HEADER_TYPE_CSUM_OFFLOAD
+-			&& ul_header->csum_valid_required) {
+-#if 0 //TODO
++		if (ul_header &&
++		    ul_header->header_type == RMNET_MAP_HEADER_TYPE_CSUM_OFFLOAD &&
++		    !ul_header->next_hdr && ul_header->csum_valid_required) {
+ 			qmap_skb->ip_summed = CHECKSUM_UNNECESSARY;
+-#endif
+ 		}
+ 
+ 		if (qmap_skb->dev->type == ARPHRD_ETHER) {

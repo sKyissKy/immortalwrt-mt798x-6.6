@@ -1,0 +1,390 @@
+From: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+Subject: [PATCH] net: ethernet: mtk_hnat: enable WED<->EXT WWAN offload and NPU SQM HQoS
+
+Enable bidirectional MT7987/NETSYS v3 PPE hardware offload between WED
+Wi-Fi 7 interfaces and no-ARP EXT cellular/tunnel devices (such as
+Quectel RM520F-GL QMAP wwan0_1), prevent secondary QDMA loops on
+FROM_EXT egress paths, guard mac rewrites on non-writable clones, and
+add the NPU SQM per-flow/priority QDMA classifier controlled via
+/sys/kernel/debug/hnat/sqm_toggle.
+
+Signed-off-by: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+---
+diff -ruN -U3 a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -33,6 +33,7 @@
+ int qos_ul_toggle = 1;
+ int xlat_toggle;
+ int tnl_toggle = 1;
++int sqm_toggle;
+ struct hnat_desc headroom[DEF_ETRY_NUM];
+ unsigned int dbg_cpu_reason_cnt[MAX_CRSN_NUM];
+ 
+@@ -2942,6 +2943,56 @@
+ 	.release = single_release,
+ };
+ 
++static int hnat_sqm_toggle_read(struct seq_file *m, void *private)
++{
++	seq_printf(m, "enabled=%d ul_base=16 dl_base=48 queues=16 qos_toggle=%d ul=%d dl=%d\n",
++		   sqm_toggle, qos_toggle, qos_ul_toggle, qos_dl_toggle);
++	return 0;
++}
++
++static int hnat_sqm_toggle_open(struct inode *inode, struct file *file)
++{
++	return single_open(file, hnat_sqm_toggle_read, file->private_data);
++}
++
++static ssize_t hnat_sqm_toggle_write(struct file *file, const char __user *buffer,
++				     size_t count, loff_t *data)
++{
++	char buf[16] = { 0 };
++	int len = count;
++	int next_val;
++
++	if (len <= 0 || len >= sizeof(buf))
++		return -EINVAL;
++	if (copy_from_user(buf, buffer, len))
++		return -EFAULT;
++	buf[len] = '\0';
++
++	if (buf[0] == '0')
++		next_val = 0;
++	else if (buf[0] == '1')
++		next_val = 1;
++	else
++		return -EINVAL;
++
++	if (sqm_toggle != next_val) {
++		sqm_toggle = next_val;
++		if (hook_toggle)
++			foe_clear_all_bind_entries();
++		pr_info("hnat sqm_toggle=%d\n", sqm_toggle);
++	}
++
++	return len;
++}
++
++static const struct file_operations hnat_sqm_toggle_fops = {
++	.open = hnat_sqm_toggle_open,
++	.read = seq_read,
++	.llseek = seq_lseek,
++	.write = hnat_sqm_toggle_write,
++	.release = single_release,
++};
++
+ static int hnat_version_read(struct seq_file *m, void *private)
+ {
+ 	pr_info("HNAT SW version : %s\nHNAT HW version : %d\n", HNAT_SW_VER, hnat_priv->data->version);
+@@ -3408,6 +3459,8 @@
+ 			    &hnat_mape_toggle_fops);
+ 	debugfs_create_file("qos_toggle", 0444, root, h,
+ 			    &hnat_qos_toggle_fops);
++	debugfs_create_file("sqm_toggle", 0644, root, h,
++			    &hnat_sqm_toggle_fops);
+ 	debugfs_create_file("hnat_version", 0444, root, h,
+ 			    &hnat_version_fops);
+ 	debugfs_create_file("hnat_ppd_if", 0444, root, h,
+diff -ruN -U3 a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+@@ -1422,6 +1422,7 @@
+ extern int mape_toggle;
+ extern int qos_toggle;
+ extern int tnl_toggle;
++extern int sqm_toggle;
+ extern bool (*mtk_crypto_offloadable)(struct sk_buff *skb);
+ extern int hnat_bind_crypto_entry(struct sk_buff *skb,
+ 				  const struct net_device *dev,
+diff -ruN -U3 a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -28,6 +28,7 @@
+ #include <net/netfilter/nf_conntrack_acct.h>
+ #include <linux/stddef.h>
+ #include <asm/unaligned.h>
++#include <linux/jhash.h>
+ 
+ #include "nf_hnat_mtk.h"
+ #include "hnat.h"
+@@ -862,7 +863,7 @@
+ 	if (!dst || !dst->dev || (dst->flags & DST_FAKE_RTABLE) || !dst->ops)
+ 		return;
+ 
+-	if (hnat_dev_is_rawip_ext(dst->dev))
++	if (hnat_dev_is_noarp_ext(dst->dev))
+ 		return;
+ 
+ 	proto = hnat_skb_has_eth_hdr(skb) ?
+@@ -1178,11 +1179,140 @@
+ 	}
+ }
+ 
++static bool hnat_sqm_is_prio_dscp(u8 dscp)
++{
++	switch (dscp >> 2) {
++	case 46: /* EF */
++	case 44: /* VA */
++	case 48: /* CS6 */
++	case 56: /* CS7 */
++	case 40: /* CS5 */
++	case 34: /* AF41 */
++	case 24: /* CS3 */
++		return true;
++	default:
++		return false;
++	}
++}
++
++static u32 hnat_sqm_classify_skb(const struct sk_buff *skb,
++				 unsigned int nh_off, __be16 proto,
++				 bool is_dl, bool per_pkt, u32 fallback_hash)
++{
++	u32 base = is_dl ? 48 : 16;
++	struct iphdr _iph;
++	const struct iphdr *iph;
++	struct ipv6hdr _ip6h;
++	const struct ipv6hdr *ip6h;
++	u8 l4_proto = 0;
++	unsigned int th_off = 0;
++	u32 hkey1 = 0, hkey2 = 0, hkey3 = 0, hash;
++
++	if (!skb)
++		return base + 1 + (fallback_hash % 15);
++
++	if (proto == htons(ETH_P_IP)) {
++		unsigned int ip_hlen;
++
++		iph = skb_header_pointer(skb, nh_off, sizeof(_iph), &_iph);
++		if (!iph || iph->ihl < 5)
++			return base + 1 + (fallback_hash % 15);
++		if (hnat_sqm_is_prio_dscp(iph->tos))
++			return base;
++
++		ip_hlen = iph->ihl * 4U;
++		l4_proto = iph->protocol;
++		th_off = nh_off + ip_hlen;
++		hkey1 = (__force u32)iph->saddr;
++		hkey2 = (__force u32)iph->daddr;
++		if (l4_proto == IPPROTO_TCP) {
++			struct tcphdr _th;
++			const struct tcphdr *th =
++				skb_header_pointer(skb, th_off, sizeof(_th), &_th);
++			if (th) {
++				unsigned int tcp_hlen = th->doff >= 5 ? th->doff * 4U : sizeof(_th);
++				u16 tot_len = ntohs(iph->tot_len);
++
++				if (per_pkt &&
++				    (tot_len <= ip_hlen + tcp_hlen ||
++				     th->syn || th->fin || th->rst))
++					return base;
++				if (ntohs(th->source) == 53 || ntohs(th->dest) == 53)
++					return base;
++				hkey3 = ((__force u32)th->source << 16) |
++					(__force u32)th->dest;
++			}
++		} else if (l4_proto == IPPROTO_UDP) {
++			struct udphdr _uh;
++			const struct udphdr *uh =
++				skb_header_pointer(skb, th_off, sizeof(_uh), &_uh);
++			if (uh) {
++				u16 sp = ntohs(uh->source), dp = ntohs(uh->dest);
++
++				if (sp == 53 || dp == 53 || sp == 123 || dp == 123)
++					return base;
++				hkey3 = ((__force u32)uh->source << 16) |
++					(__force u32)uh->dest;
++			}
++		}
++	} else if (proto == htons(ETH_P_IPV6)) {
++		u8 dscp;
++
++		ip6h = skb_header_pointer(skb, nh_off, sizeof(_ip6h), &_ip6h);
++		if (!ip6h)
++			return base + 1 + (fallback_hash % 15);
++		dscp = (u8)((ip6h->priority << 4) | (ip6h->flow_lbl[0] >> 4));
++		if (hnat_sqm_is_prio_dscp(dscp))
++			return base;
++
++		l4_proto = ip6h->nexthdr;
++		th_off = nh_off + sizeof(*ip6h);
++		hkey1 = (__force u32)(ip6h->saddr.s6_addr32[0] ^ ip6h->saddr.s6_addr32[3]);
++		hkey2 = (__force u32)(ip6h->daddr.s6_addr32[0] ^ ip6h->daddr.s6_addr32[3]);
++		if (l4_proto == NEXTHDR_TCP) {
++			struct tcphdr _th;
++			const struct tcphdr *th =
++				skb_header_pointer(skb, th_off, sizeof(_th), &_th);
++			if (th) {
++				unsigned int tcp_hlen = th->doff >= 5 ? th->doff * 4U : sizeof(_th);
++				u16 plen = ntohs(ip6h->payload_len);
++
++				if (per_pkt &&
++				    (plen <= tcp_hlen ||
++				     th->syn || th->fin || th->rst))
++					return base;
++				if (ntohs(th->source) == 53 || ntohs(th->dest) == 53)
++					return base;
++				hkey3 = ((__force u32)th->source << 16) |
++					(__force u32)th->dest;
++			}
++		} else if (l4_proto == NEXTHDR_UDP) {
++			struct udphdr _uh;
++			const struct udphdr *uh =
++				skb_header_pointer(skb, th_off, sizeof(_uh), &_uh);
++			if (uh) {
++				u16 sp = ntohs(uh->source), dp = ntohs(uh->dest);
++
++				if (sp == 53 || dp == 53 || sp == 123 || dp == 123)
++					return base;
++				hkey3 = ((__force u32)uh->source << 16) |
++					(__force u32)uh->dest;
++			}
++		}
++	} else {
++		return base + 1 + (fallback_hash % 15);
++	}
++
++	hash = jhash_3words(hkey1, hkey2, hkey3, l4_proto);
++	return base + 1 + (hash % 15);
++}
++
+ unsigned int do_hnat_ext_to_ge(struct sk_buff *skb, const struct net_device *in,
+ 			       const char *func)
+ {
+ 	struct net_device *ppdev = READ_ONCE(hnat_priv->g_ppdev);
+ 	int ext_idx;
++	__be16 l3_proto = 0;
+ 
+ 	if (!ppdev || !(ppdev->flags & IFF_UP)) {
+ 		trace_printk("%s: called from %s fail\n", __func__, func);
+@@ -1215,6 +1345,7 @@
+ 		skb_push(skb, ETH_HLEN);
+ 	}
+ 	set_to_ppe(skb);
++	l3_proto = skb->protocol;
+ 
+ 	if (unlikely(skb_vlan_tag_present(skb))) {
+ 		__be16 vproto = skb->vlan_proto ? skb->vlan_proto :
+@@ -1228,6 +1359,9 @@
+ 	/* set where we come from */
+ 	__vlan_hwaccel_put_tag(skb, htons(ETH_P_8021Q),
+ 			       VLAN_CFI_MASK | (ext_idx & VLAN_VID_MASK));
++	if (sqm_toggle && IS_HQOS_DL_MODE && !skb->mark)
++		skb->mark = hnat_sqm_classify_skb(skb, skb_network_offset(skb),
++						  l3_proto, true, true, 0);
+ 	skb->dev = ppdev;
+ 	dev_queue_xmit(skb);
+ 	return 0;
+@@ -1274,7 +1408,8 @@
+ 
+ 		if (dev == READ_ONCE(ppd_dev))
+ 			skb->mark = 0x78681415;
+-		else if (unlikely(skb->mark == 0x78681415))
++		else if (unlikely(skb->mark == 0x78681415) ||
++			 (sqm_toggle && skb->mark >= 48 && skb->mark <= 63))
+ 			skb->mark = 0;
+ 
+ 		set_from_extge(skb);
+@@ -2068,6 +2203,9 @@
+ 	if (!hnat_skb_has_eth_hdr(skb))
+ 		return;
+ 
++	if (skb_cloned(skb) && !skb_clone_writable(skb, 0))
++		return;
++
+ 	if (is_v6_ipip) {
+ 		if (skb_headroom(skb) <
+ 		    (unsigned int)(FOE_INFO_LEN + ipip_offset))
+@@ -2830,7 +2968,7 @@
+ 
+ 	ct = nf_ct_get(skb, &ctinfo);
+ 
+-	if ((IS_EXT(dev) && hnat_dev_is_rawip_ext(dev)) ||
++	if ((IS_EXT(dev) && hnat_dev_is_noarp_ext(dev)) ||
+ 	    !hnat_skb_has_eth_hdr(skb)) {
+ 		__be16 proto = hnat_skb_l3_proto(skb);
+ 
+@@ -3407,8 +3545,19 @@
+ 		qid = port_id & MTK_QDMA_TX_MASK;
+ 	else
+ 		qid = 0;
+-	if ((IS_HQOS_MODE) && (dscp!=0) &&(hnat_priv->dscp_en))
+-		qid = (dscp>>2)& (MTK_QDMA_TX_MASK);
++	if (sqm_toggle && IS_HQOS_MODE && !(skb->mark & MTK_QDMA_TX_MASK)) {
++		if (IS_HQOS_UL_MODE && IS_WAN(dev) && !IS_EXT(dev))
++			qid = hnat_sqm_classify_skb(skb, skb_network_offset(skb),
++						    eth->h_proto, false, false,
++						    skb_hnat_entry(skb));
++		else if (IS_HQOS_DL_MODE && IS_LAN_GRP(dev) &&
++			 !FROM_EXT(skb) && skb_hnat_sport(skb) != NR_QDMA_PORT)
++			qid = hnat_sqm_classify_skb(skb, skb_network_offset(skb),
++						    eth->h_proto, true, false,
++						    skb_hnat_entry(skb));
++	} else if ((IS_HQOS_MODE) && (dscp != 0) && (hnat_priv->dscp_en)) {
++		qid = (dscp >> 2) & (MTK_QDMA_TX_MASK);
++	}
+ 
+ 	if (IS_PPPQ_MODE) {
+ 		qid+= gmac;
+@@ -3461,12 +3610,17 @@
+ 				}
+ 			}
+ 
+-			if (FROM_EXT(skb) || skb_hnat_sport(skb) == NR_QDMA_PORT)
++			if (FROM_EXT(skb) || skb_hnat_sport(skb) == NR_QDMA_PORT) {
+ 				entry.ipv4_hnapt.iblk2.fqos = 0;
+ #if defined(CONFIG_MEDIATEK_NETSYS_V3)
++				entry.ipv4_hnapt.tport_id = 0;
++#endif
++			} else {
++#if defined(CONFIG_MEDIATEK_NETSYS_V3)
+ 				entry.ipv4_hnapt.tport_id = HQOS_FLAG(dev, skb, qid) ? 1 : 0;
+ #endif
+ 				entry.ipv4_hnapt.iblk2.fqos = HQOS_FLAG(dev, skb, qid) ? 1 : 0;
++			}
+ 		} else {
+ 			entry.ipv4_hnapt.iblk2.fqos = 0;
+ 		}
+@@ -3495,12 +3649,28 @@
+ 				}
+ 			}
+ 
+-			if (FROM_EXT(skb) || skb_hnat_sport(skb) == NR_QDMA_PORT)
++			if (FROM_EXT(skb) || skb_hnat_sport(skb) == NR_QDMA_PORT) {
+ 				entry.ipv6_5t_route.iblk2.fqos = 0;
+ #if defined(CONFIG_MEDIATEK_NETSYS_V3)
+ 				switch (entry.bfib1.pkt_type) {
+ 				case IPV4_MAP_E:
+ 				case IPV4_MAP_T:
++					entry.ipv4_mape.tport_id = 0;
++					break;
++				case IPV6_HNAPT:
++				case IPV6_HNAT:
++					entry.ipv6_hnapt.tport_id = 0;
++					break;
++				default:
++					entry.ipv6_5t_route.tport_id = 0;
++					break;
++				}
++#endif
++			} else {
++#if defined(CONFIG_MEDIATEK_NETSYS_V3)
++				switch (entry.bfib1.pkt_type) {
++				case IPV4_MAP_E:
++				case IPV4_MAP_T:
+ 					entry.ipv4_mape.tport_id =
+ 						HQOS_FLAG(dev, skb, qid) ? 1 : 0;
+ 					break;
+@@ -3514,8 +3684,9 @@
+ 						HQOS_FLAG(dev, skb, qid) ? 1 : 0;
+ 					break;
+ 				}
+-				entry.ipv6_5t_route.iblk2.fqos = HQOS_FLAG(dev, skb, qid) ? 1 : 0;
+ #endif
++				entry.ipv6_5t_route.iblk2.fqos = HQOS_FLAG(dev, skb, qid) ? 1 : 0;
++			}
+ 		} else {
+ 			entry.ipv6_5t_route.iblk2.fqos = 0;
+ 		}
