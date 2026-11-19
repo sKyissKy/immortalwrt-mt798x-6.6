@@ -33,7 +33,8 @@ platform_do_upgrade() {
 	bananapi,bpi-r4-pro|\
 	mediatek,mt7988a-rfb|\
 	tplink,tl-7dr7230-rev1.0-sp2|\
-	tplink,tl-7dr7299-v1)
+	tplink,tl-7dr7299-v1|\
+	tplink,tl-7dr7299-v1-dsa)
 		fit_do_upgrade "$1"
 		;;
 	arcadyan,mozart|\
@@ -64,7 +65,8 @@ platform_check_image() {
 	bananapi,bpi-r4-poe|\
 	bananapi,bpi-r4-pro|\
 	tplink,tl-7dr7230-rev1.0-sp2|\
-	tplink,tl-7dr7299-v1)
+	tplink,tl-7dr7299-v1|\
+	tplink,tl-7dr7299-v1-dsa)
 		[ "$(identify_magic_long "$magic")" != "fit" ] && {
 			echo "Invalid image type."
 			return 1
@@ -103,6 +105,10 @@ platform_copy_config() {
 
 platform_pre_upgrade() {
 	local board=$(board_name)
+
+	ifconfig rai0 down 2>/dev/null || true
+	ifconfig ra0 down 2>/dev/null || true
+	rmmod xhci-mtk-hcd 2>/dev/null || true
 
 	case "$board" in
 	*)

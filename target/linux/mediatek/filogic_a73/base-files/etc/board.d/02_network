@@ -61,7 +61,7 @@ mediatek_get_switch_type()
         local status="disabled"
 
         if [ -f "$compatible_file" ]; then
-            compatible=$(strings "$compatible_file" | head -1)
+            compatible=$(tr '\0' ',' < "$compatible_file" | sed 's/,$//')
         fi
 
         if [ -f "$status_file" ]; then
@@ -74,37 +74,48 @@ mediatek_get_switch_type()
     # Iterate over each compatible property for external dsa switch
     for dir in $dsa_base_path; do
         if [ -d "$dir" ]; then
-            read compatible status < <(check_compatible_status "$dir")
+            set -- $(check_compatible_status "$dir")
+            compatible="$1"
+            status="$2"
 
-            if [ "$compatible" = "airoha,an8855-mfd" ] && [ "$status" = "okay" ]; then
-                dts_is_dsa=1
-            fi
-
-            if [ "$compatible" = "mediatek,mt7531" ] && [ "$status" = "okay" ]; then
-                dts_is_dsa=1
-            fi
+            case "$compatible" in
+                *airoha,an8855-mfd*|\
+                *mediatek,mt7531*)
+                    if [ "$status" = "okay" ]; then
+                        dts_is_dsa=1
+                    fi
+                    ;;
+            esac
         fi
     done
 
     # Iterate over each compatible property for built-in mt7531-dsa
     for dir in $mt7531_dsa_base_path; do
         if [ -d "$dir" ]; then
-            read compatible status < <(check_compatible_status "$dir")
+            set -- $(check_compatible_status "$dir")
+            compatible="$1"
+            status="$2"
 
-            if [ "$compatible" = "mediatek,mt7988-switch" ] && [ "$status" = "okay" ]; then
-                dts_is_dsa=1
-            fi
+            case "$compatible" in
+                *mediatek,mt7988-switch*)
+                    if [ "$status" = "okay" ]; then
+                        dts_is_dsa=1
+                    fi
+                    ;;
+            esac
         fi
     done
 
     # Iterate over each compatible property for an8855-gsw and mt7531-gsw
     for dir in $gsw_base_path; do
         if [ -d "$dir" ]; then
-            read compatible status < <(check_compatible_status "$dir")
+            set -- $(check_compatible_status "$dir")
+            compatible="$1"
+            status="$2"
 
-            case $compatible in
-                airoha,an8855|\
-				mediatek,mt753x)
+            case "$compatible" in
+                *airoha,an8855*|\
+				*mediatek,mt753x*)
                     if [ "$status" = "okay" ]; then
                         dts_is_gsw=1
                     fi
@@ -133,6 +144,9 @@ mediatek_setup_interfaces()
 		ucidef_add_switch "switch0" \
 			"1:lan" "2:lan" "3:lan" "4:lan" "5:lan" "0u@eth2"
 		ucidef_set_interfaces_lan_wan "lan1 lan2 eth2" "eth1"
+		;;
+	tplink,tl-7dr7299-v1-dsa)
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4 lan5 lan6 lan7" "eth1"
 		;;
 	tplink,tl-7dr7230-rev1.0-sp2)
 		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3" eth2
@@ -190,7 +204,8 @@ mediatek_setup_macs()
 		lan_mac=$(mtd_get_mac_binary "Factory" "0xFFFF4")
 		wan_mac=$(mtd_get_mac_binary "Factory" "0xFFFFA")
 		;;
-	tplink,tl-7dr7299-v1)
+	tplink,tl-7dr7299-v1|\
+	tplink,tl-7dr7299-v1-dsa)
 		label_mac=$(get_mac_label)
 		local b0dat="$(l1dat if2dat ra0)"
 		local b1dat="$(l1dat if2dat rai0)"
