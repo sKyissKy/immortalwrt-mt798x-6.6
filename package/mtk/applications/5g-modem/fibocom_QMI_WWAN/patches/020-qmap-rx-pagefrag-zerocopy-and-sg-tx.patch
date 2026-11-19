@@ -1,0 +1,771 @@
+From: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+Subject: [PATCH] qmi_wwan_f: add header-split page-frag QMAP RX and nonlinear-safe SG TX
+
+Allocate page-frag header-split skbs in qmap_qmi_wwan_rx_fixup() and preserve paged skb fragments across QMAP SG TX without skb_linearize().
+
+Signed-off-by: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+---
+--- a/qmi_wwan_f.c
++++ b/qmi_wwan_f.c
+@@ -258,10 +258,21 @@
+     ipv4[2]  = (bridge_ipv4 >> 8) & 0xFF;
+     ipv4[3]  = (bridge_ipv4 >> 0) & 0xFF;
+ 
++    if (!pskb_may_pull(skb, ETH_HLEN + sizeof(struct arphdr)))
++        return 0;
++
++    skb_set_network_header(skb, ETH_HLEN);
+     parp = arp_hdr(skb);
+ 
+     if (parp->ar_hrd == htons(ARPHRD_ETHER)  && parp->ar_pro == htons(ETH_P_IP)
+         && parp->ar_op == htons(ARPOP_REQUEST) && parp->ar_hln == 6 && parp->ar_pln == 4) {
++        __be32 sip_addr, tip_addr;
++
++        if (!pskb_may_pull(skb, ETH_HLEN + sizeof(struct arphdr) +
++                           2 * (net->addr_len + 4)))
++            return 0;
++        skb_set_network_header(skb, ETH_HLEN);
++        parp = arp_hdr(skb);
+         arpptr = (u8 *)parp + sizeof(struct arphdr);
+         sha = arpptr;
+         arpptr += net->addr_len;    /* sha */
+@@ -273,8 +284,10 @@
+         pr_info("%s sip = %d.%d.%d.%d, tip=%d.%d.%d.%d, ipv4=%d.%d.%d.%d\n", netdev_name(net),
+             sip[0], sip[1], sip[2], sip[3], tip[0], tip[1], tip[2], tip[3], ipv4[0], ipv4[1], ipv4[2], ipv4[3]);
+     //wwan0 sip = 10.151.137.255, tip=10.151.138.0, ipv4=10.151.137.255
++        memcpy(&sip_addr, sip, sizeof(sip_addr));
++        memcpy(&tip_addr, tip, sizeof(tip_addr));
+         if (tip[0] == ipv4[0] && tip[1] == ipv4[1] && (tip[2]&0xFC) == (ipv4[2]&0xFC) && tip[3] != ipv4[3])
+-            reply = arp_create(ARPOP_REPLY, ETH_P_ARP, *((__be32 *)sip), net, *((__be32 *)tip), sha, default_modem_addr, sha);
++            reply = arp_create(ARPOP_REPLY, ETH_P_ARP, sip_addr, net, tip_addr, sha, default_modem_addr, sha);
+ 
+         if (reply) {
+             skb_reset_mac_header(reply);
+@@ -295,28 +308,39 @@
+ 
+ static struct sk_buff *bridge_mode_tx_fixup(struct net_device *net, struct sk_buff *skb, uint bridge_ipv4, unsigned char *bridge_mac) {
+     struct ethhdr *ehdr;
++    struct iphdr iph_buf;
+     const struct iphdr *iph;
+ 
++    if (!pskb_may_pull(skb, ETH_HLEN))
++        return NULL;
++
+     skb_reset_mac_header(skb);
+     ehdr = eth_hdr(skb);
+ 
+     if (ehdr->h_proto == htons(ETH_P_ARP)) {
+-        if (bridge_ipv4)
++        if (bridge_ipv4 &&
++            pskb_may_pull(skb, ETH_HLEN + sizeof(struct arphdr)))
+             bridge_arp_reply(net, skb, bridge_ipv4);
+         return NULL;
+     }
+ 
+-    iph = ip_hdr(skb);
+-    //DBG("iphdr: ");
+-    //PrintHex((void *)iph, sizeof(struct iphdr));
++    if (ehdr->h_proto == htons(ETH_P_IP)) {
++        iph = skb_header_pointer(skb, ETH_HLEN, sizeof(iph_buf), &iph_buf);
++        if (!iph)
++            return NULL;
++
++        //DBG("iphdr: ");
++        //PrintHex((void *)iph, sizeof(struct iphdr));
+ 
+ // 1    0.000000000    0.0.0.0    255.255.255.255    DHCP    362    DHCP Request  - Transaction ID 0xe7643ad7
+-    if (ehdr->h_proto == htons(ETH_P_IP) && iph->protocol == IPPROTO_UDP && iph->saddr == 0x00000000 && iph->daddr == 0xFFFFFFFF) {
+-        //if (udp_hdr(skb)->dest == htons(67)) //DHCP Request
+-        {
+-            memcpy(bridge_mac, ehdr->h_source, ETH_ALEN);
+-            pr_info("%s PC Mac Address: %02x:%02x:%02x:%02x:%02x:%02x\n", netdev_name(net),
+-                bridge_mac[0], bridge_mac[1], bridge_mac[2], bridge_mac[3], bridge_mac[4], bridge_mac[5]);
++        if (iph->protocol == IPPROTO_UDP && iph->saddr == 0x00000000 &&
++            iph->daddr == htonl(0xFFFFFFFFU)) {
++            //if (udp_hdr(skb)->dest == htons(67)) //DHCP Request
++            {
++                memcpy(bridge_mac, ehdr->h_source, ETH_ALEN);
++                pr_info("%s PC Mac Address: %02x:%02x:%02x:%02x:%02x:%02x\n", netdev_name(net),
++                    bridge_mac[0], bridge_mac[1], bridge_mac[2], bridge_mac[3], bridge_mac[4], bridge_mac[5]);
++            }
+         }
+     }
+ 
+@@ -587,23 +611,29 @@
+ 
+ static struct sk_buff * add_qhdr(struct sk_buff *skb, u8 mux_id) {
+     struct qmap_hdr *qhdr;
+-    int pad = 0;
++    u32 hdr_sz = sizeof(struct qmap_hdr);
++    int pad;
+ 
+-    pad = skb->len%4;
++    pad = (4 - (skb->len & 3)) & 3;
+     if (pad) {
+-        pad = 4 - pad;
+-        if (skb_tailroom(skb) < pad) {
+-            printk("skb_tailroom small!\n");
+-            pad = 0;
++        if (!skb_is_nonlinear(skb) && !skb_cloned(skb) &&
++            skb_tailroom(skb) >= pad) {
++            memset(__skb_put(skb, pad), 0, pad);
++        } else if (__skb_put_padto(skb, skb->len + pad, false)) {
++            dev_kfree_skb_any(skb);
++            return NULL;
+         }
+-        if (pad)
+-            __skb_put(skb, pad);
+     }
+ 
+-    qhdr = (struct qmap_hdr *)skb_push(skb, sizeof(struct qmap_hdr));
++    if (skb_cow_head(skb, hdr_sz)) {
++        dev_kfree_skb_any(skb);
++        return NULL;
++    }
++
++    qhdr = (struct qmap_hdr *)skb_push(skb, hdr_sz);
+     qhdr->cd_rsvd_pad = pad;
+     qhdr->mux_id = mux_id;
+-    qhdr->pkt_len = cpu_to_be16(skb->len - sizeof(struct qmap_hdr));
++    qhdr->pkt_len = cpu_to_be16(skb->len - hdr_sz);
+ 
+     return skb;
+ }
+@@ -611,21 +641,27 @@
+ static struct sk_buff * add_qhdr_v5(struct sk_buff *skb, u8 mux_id) {
+     struct rmnet_map_header *map_header;
+     struct rmnet_map_v5_csum_header *ul_header;
++    u32 hdr_sz = sizeof(struct rmnet_map_header) + sizeof(struct rmnet_map_v5_csum_header);
+     u32 padding, map_datalen;
+ 
+     map_datalen = skb->len;
+-    padding = map_datalen%4;
++    padding = (4 - (map_datalen & 3)) & 3;
+     if (padding) {
+-        padding = 4 - padding;
+-        if (skb_tailroom(skb) < padding) {
+-            printk("skb_tailroom small!\n");
+-            padding = 0;
++        if (!skb_is_nonlinear(skb) && !skb_cloned(skb) &&
++            skb_tailroom(skb) >= padding) {
++            memset(__skb_put(skb, padding), 0, padding);
++        } else if (__skb_put_padto(skb, map_datalen + padding, false)) {
++            dev_kfree_skb_any(skb);
++            return NULL;
+         }
+-        if (padding)
+-            __skb_put(skb, padding);
+     }
+ 
+-    map_header = (struct rmnet_map_header *)skb_push(skb, (sizeof(struct rmnet_map_header) + sizeof(struct rmnet_map_v5_csum_header)));
++    if (skb_cow_head(skb, hdr_sz)) {
++        dev_kfree_skb_any(skb);
++        return NULL;
++    }
++
++    map_header = (struct rmnet_map_header *)skb_push(skb, hdr_sz);
+     map_header->cd_bit = 0;
+     map_header->next_hdr = 1;
+     map_header->pad_len = padding;
+@@ -785,37 +821,54 @@
+ 
+ static int rmnet_usb_tx_agg_skip(struct sk_buff *skb, int offset)
+ {
+-    u8 *packet_start = skb->data + offset;
+     int ready2send = 0;
+ 
+     if (skb->protocol == htons(ETH_P_IP)) {
+-        struct iphdr *ip4h = (struct iphdr *)(packet_start);
++        struct iphdr ip4h_buf;
++        const struct iphdr *ip4h;
++
++        ip4h = skb_header_pointer(skb, offset, sizeof(*ip4h), &ip4h_buf);
++        if (!ip4h)
++            return 0;
+ 
+         if (ip4h->protocol == IPPROTO_TCP) {
+-            const struct tcphdr *th = (const struct tcphdr *)(packet_start + sizeof(struct iphdr));
+-            if (th->psh) {
++            unsigned int ip_hlen = ip4h->ihl >= 5 ?
++                ip4h->ihl * 4U : sizeof(*ip4h);
++            struct tcphdr th_buf;
++            const struct tcphdr *th;
++
++            th = skb_header_pointer(skb, offset + ip_hlen,
++                                    sizeof(*th), &th_buf);
++            if (th && th->psh)
+                 ready2send = 1;
+-            }
+-        }
+-        else if (ip4h->protocol == IPPROTO_ICMP)
++        } else if (ip4h->protocol == IPPROTO_ICMP) {
+             ready2send = 1;
+-
++        }
+     } else if (skb->protocol == htons(ETH_P_IPV6)) {
+-        struct ipv6hdr *ip6h = (struct ipv6hdr *)(packet_start);
++        struct ipv6hdr ip6h_buf;
++        const struct ipv6hdr *ip6h;
++
++        ip6h = skb_header_pointer(skb, offset, sizeof(*ip6h), &ip6h_buf);
++        if (!ip6h)
++            return 0;
+ 
+         if (ip6h->nexthdr == NEXTHDR_TCP) {
+-            const struct tcphdr *th = (const struct tcphdr *)(packet_start + sizeof(struct ipv6hdr));
+-            if (th->psh) {
++            struct tcphdr th_buf;
++            const struct tcphdr *th;
++
++            th = skb_header_pointer(skb, offset + sizeof(*ip6h),
++                                    sizeof(*th), &th_buf);
++            if (th && th->psh)
+                 ready2send = 1;
+-            }
+         } else if (ip6h->nexthdr == NEXTHDR_ICMP) {
+             ready2send = 1;
+         } else if (ip6h->nexthdr == NEXTHDR_FRAGMENT) {
+-            struct frag_hdr *frag;
++            struct frag_hdr frag_buf;
++            const struct frag_hdr *frag;
+ 
+-            frag = (struct frag_hdr *)(packet_start
+-                           + sizeof(struct ipv6hdr));
+-            if (frag->nexthdr == IPPROTO_ICMPV6)
++            frag = skb_header_pointer(skb, offset + sizeof(*ip6h),
++                                      sizeof(*frag), &frag_buf);
++            if (frag && frag->nexthdr == IPPROTO_ICMPV6)
+                 ready2send = 1;
+         }
+     }
+@@ -908,28 +961,31 @@
+ 
+     if (priv->agg_skb) {
+         if ((priv->agg_skb->len + skb->len) < ctx->ul_data_aggregation_max_size) {
+-            memcpy(skb_put(priv->agg_skb, skb->len), skb->data, skb->len);
+-            priv->agg_count++;
+-
+-            if (diff.tv_sec > 0 || diff.tv_nsec > agg_time_limit) {
+-                ready2send = 1;
+-            }
+-            else if (priv->agg_count == ctx->ul_data_aggregation_max_datagrams) {
+-                ready2send = 1;
+-            }
+-            else if (xmit_more == 0) {
+-                struct rmnet_map_header *map_header = (struct rmnet_map_header *)skb->data;
+-                size_t offset = sizeof(struct rmnet_map_header);
+-                if (map_header->next_hdr)
+-                    offset += sizeof(struct rmnet_map_v5_csum_header);
++            if (!skb_copy_bits(skb, 0, skb_tail_pointer(priv->agg_skb), skb->len)) {
++                skb_put(priv->agg_skb, skb->len);
++                priv->agg_count++;
+ 
+-                ready2send = rmnet_usb_tx_agg_skip(skb, offset);
++                if (diff.tv_sec > 0 || diff.tv_nsec > agg_time_limit) {
++                    ready2send = 1;
++                } else if (priv->agg_count == ctx->ul_data_aggregation_max_datagrams) {
++                    ready2send = 1;
++                } else if (xmit_more == 0 &&
++                           pskb_may_pull(skb, sizeof(struct rmnet_map_header))) {
++                    struct rmnet_map_header *map_header = (struct rmnet_map_header *)skb->data;
++                    size_t offset = sizeof(struct rmnet_map_header);
++
++                    if (map_header->next_hdr)
++                        offset += sizeof(struct rmnet_map_v5_csum_header);
++                    if (pskb_may_pull(skb, offset))
++                        ready2send = rmnet_usb_tx_agg_skip(skb, offset);
++                }
++            } else {
++                pNet->stats.tx_errors++;
+             }
+ 
+             dev_kfree_skb_any(skb);
+             skb = NULL;
+-        }
+-        else {
++        } else {
+             ready2send = 1;
+         }
+ 
+@@ -938,31 +994,41 @@
+             priv->agg_skb = NULL;
+             priv->agg_count = 0;
+         }
+-    }
+-    else if (skb) {
++    } else if (skb) {
+         if (diff.tv_sec > 0 || diff.tv_nsec > agg_bypass_time) {
+             ready2send = 1;
+-        }
+-        else if (xmit_more == 0) {
++        } else if (xmit_more == 0 &&
++                   pskb_may_pull(skb, sizeof(struct rmnet_map_header))) {
+             struct rmnet_map_header *map_header = (struct rmnet_map_header *)skb->data;
+             size_t offset = sizeof(struct rmnet_map_header);
++
+             if (map_header->next_hdr)
+                 offset += sizeof(struct rmnet_map_v5_csum_header);
+-
+-            ready2send = rmnet_usb_tx_agg_skip(skb, offset);
++            if (pskb_may_pull(skb, offset))
++                ready2send = rmnet_usb_tx_agg_skip(skb, offset);
+         }
+ 
+-        if (ready2send == 0) {
++        if (ready2send == 0 && skb->len <= ctx->ul_data_aggregation_max_size) {
+             priv->agg_skb = alloc_skb(ctx->ul_data_aggregation_max_size, GFP_ATOMIC);
+             if (priv->agg_skb) {
+-                memcpy(skb_put(priv->agg_skb, skb->len), skb->data, skb->len);
+-                priv->agg_count++;
+-                dev_kfree_skb_any(skb);
+-                skb = NULL;
+-            }
+-            else {
++                skb_reset_network_header(priv->agg_skb);
++                if (!skb_copy_bits(skb, 0, skb_tail_pointer(priv->agg_skb), skb->len)) {
++                    skb_put(priv->agg_skb, skb->len);
++                    priv->agg_count++;
++                    dev_kfree_skb_any(skb);
++                    skb = NULL;
++                } else {
++                    dev_kfree_skb_any(priv->agg_skb);
++                    priv->agg_skb = NULL;
++                    pNet->stats.tx_errors++;
++                    dev_kfree_skb_any(skb);
++                    skb = NULL;
++                }
++            } else {
+                 ready2send = 1;
+             }
++        } else if (ready2send == 0) {
++            ready2send = 1;
+         }
+ 
+         if (ready2send) {
+@@ -1013,6 +1079,11 @@
+ 
+     //printk("%s 1 skb=%p, len=%d, protocol=%x, hdr_len=%d\n", __func__, skb, skb->len, skb->protocol, skb->hdr_len);
+     if (pNet->type == ARPHRD_ETHER) {
++        if (!pskb_may_pull(skb, ETH_HLEN)) {
++            dev_kfree_skb_any (skb);
++            return NETDEV_TX_OK;
++        }
++
+         skb_reset_mac_header(skb);
+ 
+ #ifdef FIBOCOM_BRIDGE_MODE
+@@ -1030,15 +1101,17 @@
+     //printk("%s 2 skb=%p, len=%d, protocol=%x, hdr_len=%d\n", __func__, skb, skb->len, skb->protocol, skb->hdr_len);
+ 
+     if (priv->qmap_version == 5) {
+-        add_qhdr(skb, priv->mux_id);
+-    }
+-    else if (priv->qmap_version == 9) {
+-        add_qhdr_v5(skb, priv->mux_id);
+-    }
+-    else {
++        skb = add_qhdr(skb, priv->mux_id);
++    } else if (priv->qmap_version == 9) {
++        skb = add_qhdr_v5(skb, priv->mux_id);
++    } else {
+         dev_kfree_skb_any (skb);
+         return NETDEV_TX_OK;
+     }
++    if (!skb) {
++        pNet->stats.tx_dropped++;
++        return NETDEV_TX_OK;
++    }
+     //printk("%s skb=%p, len=%d, protocol=%x, hdr_len=%d\n", __func__, skb, skb->len, skb->protocol, skb->hdr_len);
+ 
+ #if 0
+@@ -1079,6 +1152,11 @@
+ 
+     //printk("%s 1 skb=%p, len=%d, protocol=%x, hdr_len=%d\n", __func__, skb, skb->len, skb->protocol, skb->hdr_len);
+     if (pNet->type == ARPHRD_ETHER) {
++        if (!pskb_may_pull(skb, ETH_HLEN)) {
++            dev_kfree_skb_any (skb);
++            return NETDEV_TX_OK;
++        }
++
+         skb_reset_mac_header(skb);
+ 
+ #ifdef FIBOCOM_BRIDGE_MODE
+@@ -1094,16 +1172,27 @@
+         }
+     }
+ 
++    if (priv->qmap_version == 9) {
++        skb = add_qhdr_v5(skb, FIBOCOM_QMAP_MUX_ID + priv->offset_id);
++    } else {
++        skb = add_qhdr(skb, FIBOCOM_QMAP_MUX_ID + priv->offset_id);
++    }
++    if (!skb) {
++        pNet->stats.tx_dropped++;
++        return NETDEV_TX_OK;
++    }
+ 
+-    add_qhdr(skb, FIBOCOM_QMAP_MUX_ID + priv->offset_id);
++    {
++        unsigned int len = skb->len;
+ 
+-    skb->dev = priv->real_dev;
+-    err = dev_queue_xmit(skb);
+-    if (err == NET_XMIT_SUCCESS) {
+-        pNet->stats.tx_packets++;
+-        pNet->stats.tx_bytes += skb->len;
+-    } else {
+-        pNet->stats.tx_errors++;
++        skb->dev = priv->real_dev;
++        err = dev_queue_xmit(skb);
++        if (err == NET_XMIT_SUCCESS) {
++            pNet->stats.tx_packets++;
++            pNet->stats.tx_bytes += len;
++        } else {
++            pNet->stats.tx_errors++;
++        }
+     }
+ 
+     return err;
+@@ -1223,6 +1312,9 @@
+         rmnet_usb_vnd_setup(qmap_net);
+     }
+ 
++    qmap_net->hw_features |= (real_dev->hw_features & NETIF_F_SG);
++    qmap_net->features |= (real_dev->features & NETIF_F_SG);
++
+     err = register_netdev(qmap_net);
+     dev_info(&real_dev->dev, "%s(%s)=%d\n", __func__, qmap_net->name, err);
+     if (err < 0)
+@@ -1411,15 +1503,21 @@
+     // Skip Ethernet header from message
+     if (dev->net->hard_header_len == 0)
+         return skb;
+-    else
+-        skb_reset_mac_header(skb);
++
++    if (!pskb_may_pull(skb, ETH_HLEN)) {
++        dev_err(&dev->intf->dev,  "Packet Dropped ");
++        dev_kfree_skb_any(skb);
++        return NULL;
++    }
++    skb_reset_mac_header(skb);
+ 
+ #ifdef FIBOCOM_BRIDGE_MODE
+ {
+     struct qmi_wwan_state *info = (void *)&dev->data;
+     sQmiWwanQmap *pQmapDev = (sQmiWwanQmap *)info->unused;
+ 
+-    if (pQmapDev->bridge_mode && bridge_mode_tx_fixup(dev->net, skb, pQmapDev->bridge_ipv4, pQmapDev->bridge_mac) == NULL) {
++    if (pQmapDev && pQmapDev->bridge_mode &&
++        bridge_mode_tx_fixup(dev->net, skb, pQmapDev->bridge_ipv4, pQmapDev->bridge_mac) == NULL) {
+           dev_kfree_skb_any (skb);
+           return NULL;
+     }
+@@ -1508,6 +1606,40 @@
+     return 1;
+ }
+ 
++static struct sk_buff *qmap_build_rx_skb(struct net_device *net,
++                                         struct sk_buff *skb_in,
++                                         const u8 *payload,
++                                         unsigned int pkt_len,
++                                         unsigned int extra_headroom)
++{
++    unsigned int headroom = ETH_HLEN + 32 + extra_headroom;
++    struct sk_buff *qmap_skb;
++
++    if (skb_in->head_frag && !skb_is_nonlinear(skb_in) && pkt_len > 256) {
++        struct page *head_page = virt_to_head_page(skb_in->head);
++        unsigned int frag_len = pkt_len - 128;
++
++        qmap_skb = __netdev_alloc_skb(net, headroom + 128, GFP_ATOMIC);
++        if (!qmap_skb)
++            return NULL;
++        skb_reserve(qmap_skb, headroom);
++        skb_put_data(qmap_skb, payload, 128);
++        page_ref_inc(head_page);
++        skb_add_rx_frag(qmap_skb, 0, head_page,
++                        (const u8 *)(payload + 128) -
++                        (const u8 *)page_address(head_page),
++                        frag_len, SKB_DATA_ALIGN(frag_len));
++        return qmap_skb;
++    }
++
++    qmap_skb = __netdev_alloc_skb(net, headroom + pkt_len, GFP_ATOMIC);
++    if (!qmap_skb)
++        return NULL;
++    skb_reserve(qmap_skb, headroom);
++    skb_put_data(qmap_skb, payload, pkt_len);
++    return qmap_skb;
++}
++
+ #if defined(FIBOCOM_WWAN_QMAP)
+ static struct sk_buff *qmap_qmi_wwan_tx_fixup(struct usbnet *dev, struct sk_buff *skb, gfp_t flags) {
+     struct qmi_wwan_state *info = (void *)&dev->data;
+@@ -1521,25 +1653,40 @@
+         goto drop_skb;
+     } else if (pQmapDev->qmap_mode == 0) {
+         skb = qmi_wwan_tx_fixup(dev, skb, flags);
+-    }
+-    else if (pQmapDev->qmap_mode > 1) {
++    } else if (pQmapDev->qmap_mode > 1) {
+         if (likely(skb)) {
++            struct rmnet_map_header *map_hdr;
++            size_t hdr_sz = sizeof(struct qmap_hdr);
++            unsigned int pkt_len;
++
++            if (!pskb_may_pull(skb, sizeof(struct qmap_hdr)))
++                goto drop_skb;
+             qhdr = (struct qmap_hdr *)skb->data;
+-            if ((qhdr->mux_id&0xF0) != 0x80 || ((be16_to_cpu(qhdr->pkt_len) + sizeof(struct qmap_hdr)) != skb->len)) {
++            map_hdr = (struct rmnet_map_header *)skb->data;
++            if (map_hdr->next_hdr || pQmapDev->qmap_version == 9) {
++                hdr_sz += sizeof(struct rmnet_map_v5_csum_header);
++                if (!pskb_may_pull(skb, hdr_sz))
++                    goto drop_skb;
++                qhdr = (struct qmap_hdr *)skb->data;
++            }
++            pkt_len = be16_to_cpu(qhdr->pkt_len);
++            if ((qhdr->mux_id & 0xF0) != 0x80 ||
++                hdr_sz + pkt_len > skb->len) {
+                 goto drop_skb;
+             }
+         }
+-    }
+-    else {
++    } else {
+         if (likely(skb)) {
+             skb = qmi_wwan_tx_fixup(dev, skb, flags);
+ 
+             if (skb) {
+-                add_qhdr(skb, FIBOCOM_QMAP_MUX_ID);
++                if (pQmapDev->qmap_version == 9)
++                    skb = add_qhdr_v5(skb, FIBOCOM_QMAP_MUX_ID);
++                else
++                    skb = add_qhdr(skb, FIBOCOM_QMAP_MUX_ID);
+             }
+-            else {
++            if (!skb)
+                 return NULL;
+-            }
+         }
+     }
+ 
+@@ -1547,10 +1694,12 @@
+         usbnet_set_skb_tx_stats(skb, 1, 0);
+      }
+ 
+-
+     return skb;
+ drop_skb:
+-    dev_kfree_skb_any (skb);
++    if (skb) {
++        dev->net->stats.tx_dropped++;
++        dev_kfree_skb_any(skb);
++    }
+     return NULL;
+ }
+ 
+@@ -1558,15 +1707,11 @@
+ {
+     struct qmi_wwan_state *info = (void *)&dev->data;
+     sQmiWwanQmap *pQmapDev = (sQmiWwanQmap *)info->unused;
+-    unsigned headroom = 0;
+-    const unsigned need_headroot = ETH_HLEN;
+     struct sk_buff *qmap_skb;
+ 
+     if (pQmapDev->qmap_mode == 0)
+         return qmi_wwan_rx_fixup(dev, skb_in);
+ 
+-    headroom = skb_headroom(skb_in);
+-
+     while (skb_in->len > sizeof(struct qmap_hdr)) {
+         struct qmap_hdr *qhdr = (struct qmap_hdr *)skb_in->data;
+         struct net_device *qmap_net;
+@@ -1575,12 +1720,6 @@
+         __be16 protocol;
+         int mux_id;
+ 
+-        skb_len = pkt_len - (qhdr->cd_rsvd_pad&0x3F);
+-        if (skb_len > 1500) {
+-            dev_info(&dev->net->dev, "drop skb_len=%x larger than 1500\n", skb_len);
+-            goto error_pkt;
+-        }
+-
+         if (skb_in->len < (pkt_len + sizeof(struct qmap_hdr))) {
+             dev_info(&dev->net->dev, "drop qmap unknow pkt, len=%d, pkt_len=%d\n", skb_in->len, pkt_len);
+             goto error_pkt;
+@@ -1591,53 +1730,43 @@
+             goto skip_pkt;
+         }
+ 
+-        switch (skb_in->data[sizeof(struct qmap_hdr)] & 0xf0) {
+-            case 0x40:
+-                protocol = htons(ETH_P_IP);
+-            break;
+-            case 0x60:
+-                protocol = htons(ETH_P_IPV6);
+-            break;
+-            default:
+-                dev_info(&dev->net->dev, "unknow skb->protocol %02x\n", skb_in->data[sizeof(struct qmap_hdr)]);
+-                goto error_pkt;
++        skb_len = pkt_len - (qhdr->cd_rsvd_pad & 0x3F);
++        if (skb_len <= 0 || skb_len > 1500) {
++            dev_info(&dev->net->dev, "drop skb_len=%x larger than 1500\n", skb_len);
++            goto error_pkt;
+         }
+ 
+         mux_id = qhdr->mux_id - FIBOCOM_QMAP_MUX_ID;
+-        if (mux_id >= pQmapDev->qmap_mode) {
++        if (mux_id < 0 || mux_id >= pQmapDev->qmap_mode) {
+             dev_info(&dev->net->dev, "drop qmap unknow mux_id %x\n", qhdr->mux_id);
+             goto error_pkt;
+         }
+ 
+         qmap_net = pQmapDev->mpQmapNetDev[mux_id];
+-
+         if (qmap_net == NULL) {
+             dev_info(&dev->net->dev, "drop qmap unknow mux_id %x\n", qhdr->mux_id);
+             goto skip_pkt;
+         }
+ 
+-        if (headroom >= need_headroot) {
+-            qmap_skb = skb_clone(skb_in, GFP_ATOMIC);
+-            if (qmap_skb) {
+-                qmap_skb->dev = qmap_net;
+-                skb_pull(qmap_skb, sizeof(struct qmap_hdr));
+-                skb_trim(qmap_skb, skb_len);
+-            }
+-            headroom = (qhdr->cd_rsvd_pad&0x3F);
+-        }
+-        else {
+-            qmap_skb = netdev_alloc_skb(qmap_net, need_headroot + skb_len);
+-            if (qmap_skb) {
+-                skb_reserve(qmap_skb, need_headroot);
+-                skb_put(qmap_skb, skb_len);
+-                memcpy(qmap_skb->data, skb_in->data + sizeof(struct qmap_hdr), skb_len);
+-            }
+-            headroom = pkt_len;
++        switch (skb_in->data[sizeof(struct qmap_hdr)] & 0xf0) {
++        case 0x40:
++            protocol = htons(ETH_P_IP);
++            break;
++        case 0x60:
++            protocol = htons(ETH_P_IPV6);
++            break;
++        default:
++            dev_info(&dev->net->dev, "unknow skb->protocol %02x\n", skb_in->data[sizeof(struct qmap_hdr)]);
++            goto error_pkt;
+         }
+ 
++        qmap_skb = qmap_build_rx_skb(qmap_net, skb_in,
++                                     skb_in->data + sizeof(struct qmap_hdr),
++                                     skb_len, 0);
++
+         if (qmap_skb == NULL) {
+             dev_info(&dev->net->dev, "fail to alloc skb, pkt_len = %d\n", skb_len);
+-            return 0;
++            goto error_pkt;
+         }
+ 
+         skb_push(qmap_skb, ETH_HLEN);
+@@ -1660,6 +1789,7 @@
+         skb_pull(skb_in, pkt_len + sizeof(struct qmap_hdr));
+     }
+ 
++error_pkt:
+     while ((qmap_skb = skb_dequeue (&pQmapDev->skb_chain))) {
+         if (qmap_skb->dev != dev->net) {
+             qmap_skb->protocol = eth_type_trans (qmap_skb, qmap_skb->dev);
+@@ -1671,7 +1801,6 @@
+         }
+     }
+ 
+-error_pkt:
+     return 0;
+ }
+ #endif
+@@ -1940,6 +2069,11 @@
+         pQmapDev->link_state = 1;
+ 
+         dev->net->features |= (NETIF_F_VLAN_CHALLENGED);
++        if (usb_device_no_sg_constraint(dev->udev)) {
++            dev->can_dma_sg = 1;
++            dev->net->features |= NETIF_F_SG;
++            dev->net->hw_features |= NETIF_F_SG;
++        }
+ 
+         skb_queue_head_init(&pQmapDev->skb_chain);
+ 
+@@ -2189,13 +2323,6 @@
+             hdr_size += sizeof(struct rmnet_map_v5_csum_header);
+         }
+ 
+-        skb_len = pkt_len - (map_header->pad_len&0x3F);
+-        skb_len -= dl_minimum_padding;
+-        if (skb_len > 1500) {
+-            dev_info(&dev->net->dev, "drop skb_len=%x larger than 1500\n", skb_len);
+-            goto error_pkt;
+-        }
+-
+         if (skb_in->len < (pkt_len + hdr_size)) {
+             dev_info(&dev->net->dev, "drop qmap unknow pkt, len=%d, pkt_len=%d\n", skb_in->len, pkt_len);
+             goto error_pkt;
+@@ -2206,37 +2333,41 @@
+             goto skip_pkt;
+         }
+ 
+-        switch (skb_in->data[hdr_size] & 0xf0) {
+-            case 0x40:
+-                protocol = htons(ETH_P_IP);
+-            break;
+-            case 0x60:
+-                protocol = htons(ETH_P_IPV6);
+-            break;
+-            default:
+-                dev_info(&dev->net->dev, "unknow skb->protocol %02x\n", skb_in->data[hdr_size]);
+-                goto error_pkt;
++        skb_len = pkt_len - (map_header->pad_len & 0x3F);
++        skb_len -= dl_minimum_padding;
++        if (skb_len <= 0 || skb_len > 1500) {
++            dev_info(&dev->net->dev, "drop skb_len=%x larger than 1500\n", skb_len);
++            goto error_pkt;
+         }
+ 
+         mux_id = map_header->mux_id - FIBOCOM_QMAP_MUX_ID;
+-        if (mux_id >= pQmapDev->qmap_mode) {
++        if (mux_id < 0 || mux_id >= pQmapDev->qmap_mode) {
+             dev_info(&dev->net->dev, "drop qmap unknow mux_id %x\n", map_header->mux_id);
+             goto error_pkt;
+         }
+ 
+         qmap_net = pQmapDev->mpQmapNetDev[mux_id];
+-
+         if (qmap_net == NULL) {
+             dev_info(&dev->net->dev, "drop qmap unknow mux_id %x\n", map_header->mux_id);
+             goto skip_pkt;
+         }
+ 
+-        qmap_skb = netdev_alloc_skb(qmap_net, skb_len);
+-        if (qmap_skb) {
+-            skb_put(qmap_skb, skb_len);
+-            memcpy(qmap_skb->data, skb_in->data + hdr_size, skb_len);
++        switch (skb_in->data[hdr_size] & 0xf0) {
++        case 0x40:
++            protocol = htons(ETH_P_IP);
++            break;
++        case 0x60:
++            protocol = htons(ETH_P_IPV6);
++            break;
++        default:
++            dev_info(&dev->net->dev, "unknow skb->protocol %02x\n", skb_in->data[hdr_size]);
++            goto error_pkt;
+         }
+ 
++        qmap_skb = qmap_build_rx_skb(qmap_net, skb_in,
++                                     skb_in->data + hdr_size,
++                                     skb_len, 0);
++
+         if (qmap_skb == NULL) {
+             dev_info(&dev->net->dev, "fail to alloc skb, pkt_len = %d\n", skb_len);
+             goto error_pkt;
