@@ -1,0 +1,17 @@
+{
+	"luci-app-mtk-npu-sqm": {
+		"description": "Grant UCI and RPC access for MediaTek NPU Hardware SQM-QoS",
+		"read": {
+			"ubus": {
+				"luci.mtk_npu_sqm": [ "getStatus" ]
+			},
+			"uci": [ "mtk_npu_sqm" ]
+		},
+		"write": {
+			"ubus": {
+				"luci.mtk_npu_sqm": [ "apply" ]
+			},
+			"uci": [ "mtk_npu_sqm" ]
+		}
+	}
+}

@@ -1,0 +1,143 @@
+msgid ""
+msgstr "Content-Type: text/plain; charset=UTF-8\n"
+
+msgid "MTK NPU SQM QoS"
+msgstr ""
+
+msgid "MediaTek NPU Hardware SQM QoS"
+msgstr ""
+
+msgid "Configure NETSYS v3 QDMA 16-queue fair/priority hardware SQM scheduling and hybrid CAKE uplink shaping for 5G EXT interfaces."
+msgstr ""
+
+msgid "Realtime Status"
+msgstr ""
+
+msgid "Engine State"
+msgstr ""
+
+msgid "Offload Mode"
+msgstr ""
+
+msgid "Bound WAN Interface"
+msgstr ""
+
+msgid "HNAT Kernel Flags"
+msgstr ""
+
+msgid "Downlink QDMA (Scheduler 3)"
+msgstr ""
+
+msgid "Uplink QDMA (Scheduler 2)"
+msgstr ""
+
+msgid "CAKE Uplink Qdisc"
+msgstr ""
+
+msgid "Enabled"
+msgstr ""
+
+msgid "Disabled"
+msgstr ""
+
+msgid "Packets"
+msgstr ""
+
+msgid "Drops"
+msgstr ""
+
+msgid "Blocked (EQoS / mtkhqos active)"
+msgstr ""
+
+msgid "Active (Hardware PPE + QDMA)"
+msgstr ""
+
+msgid "Active (CAKE Uplink Only)"
+msgstr ""
+
+msgid "Stopped"
+msgstr ""
+
+msgid "Hybrid (QDMA Hardware Downlink + CAKE Uplink)"
+msgstr ""
+
+msgid "Full Hardware NPU QDMA (Bidirectional)"
+msgstr ""
+
+msgid "Priority Q48"
+msgstr ""
+
+msgid "Flow Q49-63"
+msgstr ""
+
+msgid "Priority Q16"
+msgstr ""
+
+msgid "Flow Q17-31"
+msgstr ""
+
+msgid "None"
+msgstr ""
+
+msgid "SQM Policy Settings"
+msgstr ""
+
+msgid "Enable NPU SQM QoS"
+msgstr ""
+
+msgid "WAN Interface"
+msgstr ""
+
+msgid "Auto Detect (5G wwan / Ethernet WAN)"
+msgstr ""
+
+msgid "Download Bandwidth (kbit/s)"
+msgstr ""
+
+msgid "Set 0 to disable downlink shaping. Recommended: 85-95% of measured download speed."
+msgstr ""
+
+msgid "Upload Bandwidth (kbit/s)"
+msgstr ""
+
+msgid "Set 0 to disable uplink shaping. On 5G wwan interfaces, CAKE runs on egress; on Ethernet WAN, QDMA Scheduler 2 handles uplink in hardware."
+msgstr ""
+
+msgid "Hardware Queue Scheduler"
+msgstr ""
+
+msgid "WRR (Weighted Round Robin)"
+msgstr ""
+
+msgid "SP (Strict Priority)"
+msgstr ""
+
+msgid "Priority Queue Weight (1 - 15)"
+msgstr ""
+
+msgid "Weight applied to hardware priority queues (Q16/Q48: small TCP ACKs, SYN/FIN/RST, DNS, NTP, EF/CS5-7 DSCP)."
+msgstr ""
+
+msgid "Flow-Fair Queue Weight (1 - 15)"
+msgstr ""
+
+msgid "Weight applied per queue across 15 hardware 5-tuple hash queues (Q17-31 UL / Q49-63 DL)."
+msgstr ""
+
+msgid "Hardware Queue Buffer Reserve (1 - 15)"
+msgstr ""
+
+msgid "CAKE DiffServ Mode (5G EXT Uplink)"
+msgstr ""
+
+msgid "Enable CAKE ACK Filter (5G EXT Uplink)"
+msgstr ""
+
+msgid "Apply returned non-zero status"
+msgstr ""
+
+msgid "Configuration has been applied."
+msgstr ""
+
+msgid "Failed to apply configuration: %s"
+msgstr ""

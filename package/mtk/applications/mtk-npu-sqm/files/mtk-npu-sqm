@@ -1,0 +1,460 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# MediaTek NETSYS v3 QDMA Hardware SQM-QoS Controller
+
+UCI_BIN="${MTK_SQM_UCI_BIN:-uci}"
+TC_BIN="${MTK_SQM_TC_BIN:-tc}"
+UBUS_BIN="${MTK_SQM_UBUS_BIN:-ubus}"
+QDMA_DIR="${MTK_SQM_QDMA_DIR:-/sys/kernel/debug/mtketh}"
+HNAT_DIR="${MTK_SQM_HNAT_DIR:-/sys/kernel/debug/hnat}"
+SYS_NET="${MTK_SQM_SYS_NET:-/sys/class/net}"
+STATE_FILE="${MTK_SQM_STATE_FILE:-/tmp/run/mtk_npu_sqm.state}"
+
+log_msg() {
+	logger -t mtk-npu-sqm "$*" 2>/dev/null || true
+}
+
+log_err() {
+	printf 'mtk-npu-sqm: %s\n' "$*" >&2
+	log_msg "ERROR: $*"
+}
+
+uci_get() {
+	"$UCI_BIN" -q get "$1" 2>/dev/null
+}
+
+is_uint() {
+	case "${1:-}" in
+		''|*[!0-9]*) return 1 ;;
+		*) return 0 ;;
+	esac
+}
+
+in_range() {
+	local val="$1" min="$2" max="$3"
+	is_uint "$val" || return 1
+	[ "$val" -ge "$min" ] && [ "$val" -le "$max" ]
+}
+
+debugfs_write() {
+	local path="$1" val="$2"
+	[ -e "$path" ] || return 0
+	echo "$val" > "$path" 2>/dev/null
+}
+
+qdma_sch_write() {
+	local sch="$1" val="$2"
+	debugfs_write "$QDMA_DIR/qdma_sch$sch" "$val"
+}
+
+qdma_txq_write() {
+	local q="$1" val="$2"
+	debugfs_write "$QDMA_DIR/qdma_txq$q" "$val"
+}
+
+reset_dl_queues() {
+	local q=48
+	qdma_sch_write 3 "0 wrr 0"
+	while [ "$q" -le 63 ]; do
+		qdma_txq_write "$q" "0 0 0 0 0 4 4"
+		q=$((q + 1))
+	done
+}
+
+reset_ul_queues() {
+	local q=16
+	qdma_sch_write 2 "0 wrr 0"
+	while [ "$q" -le 31 ]; do
+		qdma_txq_write "$q" "0 0 0 0 0 4 4"
+		q=$((q + 1))
+	done
+}
+
+conflict_qos_active() {
+	local v
+	for key in eqos.config.enabled eqos.@eqos[0].enabled mtkhqos.@global[0].hqos mtkhqos.global.hqos; do
+		v="$(uci_get "$key")"
+		[ "$v" = "1" ] && return 0
+	done
+	return 1
+}
+
+ubus_iface_dev() {
+	local iface="$1" status dev
+	command -v "$UBUS_BIN" >/dev/null 2>&1 || return 1
+	status="$("$UBUS_BIN" -t 2 call "network.interface.$iface" status 2>/dev/null)" || return 1
+	dev="$(printf '%s\n' "$status" | sed -n 's/.*"l3_device"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+	if [ -z "$dev" ]; then
+		dev="$(printf '%s\n' "$status" | sed -n 's/.*"device"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)"
+	fi
+	[ -n "$dev" ] || return 1
+	printf '%s\n' "$dev"
+}
+
+detect_wan_dev() {
+	local cfg_if="${1:-auto}" dev iface
+	if [ -n "$cfg_if" ] && [ "$cfg_if" != "auto" ]; then
+		printf '%s\n' "$cfg_if"
+		return 0
+	fi
+	for iface in wan_5g wan6_5g wan modem wan6; do
+		dev="$(ubus_iface_dev "$iface")"
+		if [ -n "$dev" ]; then
+			printf '%s\n' "$dev"
+			return 0
+		fi
+	done
+	if [ -d "$SYS_NET/wwan0_1" ]; then
+		printf 'wwan0_1\n'
+		return 0
+	fi
+	if [ -d "$SYS_NET/eth1" ]; then
+		printf 'eth1\n'
+		return 0
+	fi
+	printf 'eth1\n'
+}
+
+classify_wan_mode() {
+	local dev="$1" hnat_wan=""
+	case "$dev" in
+		wwan*|usb*|rmnet*|ccmni*|apcli*|wds*|tun*|tap*|wg*|ppp*)
+			printf 'hybrid_ext\n'
+			return 0
+			;;
+	esac
+	if [ -r "$HNAT_DIR/wan_if" ]; then
+		hnat_wan="$(tr -d ' \t\r\n' < "$HNAT_DIR/wan_if" 2>/dev/null)"
+	fi
+	if [ -n "$hnat_wan" ] && [ "$hnat_wan" != "$dev" ] && [ "$dev" != "eth1" ]; then
+		printf 'hybrid_ext\n'
+	else
+		printf 'full_npu\n'
+	fi
+}
+
+tc_del_root_quiet() {
+	local dev="$1" out rc
+	[ -n "$dev" ] || return 0
+	command -v "$TC_BIN" >/dev/null 2>&1 || return 0
+	[ -d "$SYS_NET/$dev" ] || return 0
+	out="$("$TC_BIN" qdisc del dev "$dev" root 2>&1)"
+	rc=$?
+	[ "$rc" -eq 0 ] && return 0
+	case "$out" in
+		*"No such file or directory"*|*"Cannot delete qdisc with handle of zero"*|*"Cannot find device"*|*"Invalid argument"*|*"does not exist"*)
+			return 0
+			;;
+	esac
+	return 0
+}
+
+read_state_var() {
+	local var="$1"
+	[ -r "$STATE_FILE" ] || return 0
+	sed -n "s/^${var}=//p" "$STATE_FILE" 2>/dev/null | head -n 1
+}
+
+save_state() {
+	local dir
+	dir="$(dirname "$STATE_FILE")"
+	mkdir -p "$dir" 2>/dev/null || true
+	cat > "$STATE_FILE" <<EOF
+active=$1
+wan_dev=$2
+wan_mode=$3
+download=$4
+upload=$5
+scheduler=$6
+qos_cmd=$7
+last_cake_dev=$8
+EOF
+}
+
+load_config() {
+	CFG_ENABLED="$(uci_get mtk_npu_sqm.global.enabled)"
+	CFG_WAN_IF="$(uci_get mtk_npu_sqm.global.wan_ifname)"
+	CFG_DL="$(uci_get mtk_npu_sqm.global.download)"
+	CFG_UL="$(uci_get mtk_npu_sqm.global.upload)"
+	CFG_SCH="$(uci_get mtk_npu_sqm.global.scheduler)"
+	CFG_PRIO_W="$(uci_get mtk_npu_sqm.global.prio_weight)"
+	CFG_BULK_W="$(uci_get mtk_npu_sqm.global.bulk_weight)"
+	CFG_RESV="$(uci_get mtk_npu_sqm.global.queue_resv)"
+	CFG_CAKE_DS="$(uci_get mtk_npu_sqm.global.cake_diffserv)"
+	CFG_CAKE_ACK="$(uci_get mtk_npu_sqm.global.cake_ack_filter)"
+
+	: "${CFG_ENABLED:=0}"
+	: "${CFG_WAN_IF:=auto}"
+	: "${CFG_DL:=0}"
+	: "${CFG_UL:=0}"
+	: "${CFG_SCH:=wrr}"
+	: "${CFG_PRIO_W:=15}"
+	: "${CFG_BULK_W:=4}"
+	: "${CFG_RESV:=2}"
+	: "${CFG_CAKE_DS:=diffserv4}"
+	: "${CFG_CAKE_ACK:=1}"
+}
+
+do_stop() {
+	local prev_cake cur_wan
+	load_config
+	prev_cake="$(read_state_var last_cake_dev)"
+	cur_wan="$(detect_wan_dev "$CFG_WAN_IF")"
+
+	if ! conflict_qos_active; then
+		debugfs_write "$HNAT_DIR/sqm_toggle" "0"
+		debugfs_write "$HNAT_DIR/qos_toggle" "0"
+		reset_ul_queues
+		reset_dl_queues
+	fi
+
+	[ -n "$prev_cake" ] && tc_del_root_quiet "$prev_cake"
+	if [ -n "$cur_wan" ] && [ "$cur_wan" != "$prev_cake" ]; then
+		tc_del_root_quiet "$cur_wan"
+	fi
+	rm -f "$STATE_FILE"
+	return 0
+}
+
+do_start() {
+	local wan_dev wan_mode prev_cake ack_arg qos_cmd sqm_on cake_dev="" q
+
+	if conflict_qos_active; then
+		log_err "conflict: eqos or mtkhqos is enabled; disable it before enabling mtk-npu-sqm"
+		return 1
+	fi
+
+	load_config
+	prev_cake="$(read_state_var last_cake_dev)"
+	wan_dev="$(detect_wan_dev "$CFG_WAN_IF")"
+
+	if [ -n "$prev_cake" ] && [ "$prev_cake" != "$wan_dev" ]; then
+		tc_del_root_quiet "$prev_cake"
+	fi
+
+	if [ "$CFG_ENABLED" != "1" ] || { [ "$CFG_DL" = "0" ] && [ "$CFG_UL" = "0" ]; }; then
+		do_stop
+		return $?
+	fi
+
+	in_range "$CFG_DL" 0 10000000 || { log_err "invalid download rate: $CFG_DL"; return 1; }
+	in_range "$CFG_UL" 0 10000000 || { log_err "invalid upload rate: $CFG_UL"; return 1; }
+	in_range "$CFG_PRIO_W" 1 15 || { log_err "invalid prio_weight: $CFG_PRIO_W"; return 1; }
+	in_range "$CFG_BULK_W" 1 15 || { log_err "invalid bulk_weight: $CFG_BULK_W"; return 1; }
+	in_range "$CFG_RESV" 1 15 || { log_err "invalid queue_resv: $CFG_RESV"; return 1; }
+	case "$CFG_SCH" in
+		wrr|sp) ;;
+		*) log_err "invalid scheduler: $CFG_SCH"; return 1 ;;
+	esac
+	case "$CFG_CAKE_DS" in
+		diffserv4|diffserv3|diffserv8|besteffort) ;;
+		*) CFG_CAKE_DS="diffserv4" ;;
+	esac
+
+	wan_mode="$(classify_wan_mode "$wan_dev")"
+
+	if [ "$CFG_DL" -gt 0 ]; then
+		qdma_sch_write 3 "1 $CFG_SCH $CFG_DL" || { log_err "failed writing qdma_sch3"; return 1; }
+		qdma_txq_write 48 "3 0 0 1 $CFG_DL $CFG_PRIO_W $CFG_RESV"
+		q=49
+		while [ "$q" -le 63 ]; do
+			qdma_txq_write "$q" "3 0 0 1 $CFG_DL $CFG_BULK_W $CFG_RESV"
+			q=$((q + 1))
+		done
+	else
+		reset_dl_queues
+	fi
+
+	if [ "$CFG_UL" -gt 0 ]; then
+		if [ "$wan_mode" = "full_npu" ]; then
+			[ -n "$prev_cake" ] && tc_del_root_quiet "$prev_cake"
+			tc_del_root_quiet "$wan_dev"
+			qdma_sch_write 2 "1 $CFG_SCH $CFG_UL" || { log_err "failed writing qdma_sch2"; return 1; }
+			qdma_txq_write 16 "2 0 0 1 $CFG_UL $CFG_PRIO_W $CFG_RESV"
+			q=17
+			while [ "$q" -le 31 ]; do
+				qdma_txq_write "$q" "2 0 0 1 $CFG_UL $CFG_BULK_W $CFG_RESV"
+				q=$((q + 1))
+			done
+		else
+			reset_ul_queues
+			if [ -d "$SYS_NET/$wan_dev" ] && command -v "$TC_BIN" >/dev/null 2>&1; then
+				ack_arg="no-ack-filter"
+				[ "$CFG_CAKE_ACK" = "1" ] && ack_arg="ack-filter"
+				if ! "$TC_BIN" qdisc replace dev "$wan_dev" root cake \
+					bandwidth "${CFG_UL}kbit" "$CFG_CAKE_DS" nat wash split-gso "$ack_arg" 2>/dev/null; then
+					log_err "failed attaching CAKE on $wan_dev"
+					return 1
+				fi
+				cake_dev="$wan_dev"
+			fi
+		fi
+	else
+		reset_ul_queues
+		tc_del_root_quiet "$wan_dev"
+	fi
+
+	if [ "$CFG_DL" -gt 0 ] && [ "$CFG_UL" -gt 0 ] && [ "$wan_mode" = "full_npu" ]; then
+		qos_cmd="1"
+		sqm_on="1"
+	elif [ "$CFG_DL" -gt 0 ]; then
+		qos_cmd="1 downlink"
+		sqm_on="1"
+	elif [ "$CFG_UL" -gt 0 ] && [ "$wan_mode" = "full_npu" ]; then
+		qos_cmd="1 uplink"
+		sqm_on="1"
+	else
+		qos_cmd="0"
+		sqm_on="0"
+	fi
+
+	debugfs_write "$HNAT_DIR/qos_toggle" "$qos_cmd"
+	debugfs_write "$HNAT_DIR/sqm_toggle" "$sqm_on"
+	save_state "1" "$wan_dev" "$wan_mode" "$CFG_DL" "$CFG_UL" "$CFG_SCH" "$qos_cmd" "$cake_dev"
+	log_msg "applied mode=$wan_mode dev=$wan_dev dl=${CFG_DL}k ul=${CFG_UL}k sch=$CFG_SCH qos=$qos_cmd sqm=$sqm_on"
+	return 0
+}
+
+read_sch_summary() {
+	local sch="$1" path="$QDMA_DIR/qdma_sch$1" line
+	if [ ! -r "$path" ]; then
+		printf '0 WRR 0\n'
+		return 0
+	fi
+	line="$(awk 'NR==2 {printf "%s %s %s", $1, $2, $3; exit}' "$path" 2>/dev/null)"
+	[ -n "$line" ] && printf '%s\n' "$line" || printf '0 WRR 0\n'
+}
+
+sum_queue_range() {
+	local start="$1" end="$2" q="$1" pkt_sum=0 drop_sum=0 pc pd path
+	while [ "$q" -le "$end" ]; do
+		path="$QDMA_DIR/qdma_txq$q"
+		if [ -r "$path" ]; then
+			pc="$(awk -F': ' '/^packet count:/ {print $2; exit}' "$path" 2>/dev/null)"
+			pd="$(awk -F': ' '/^packet drop:/ {print $2; exit}' "$path" 2>/dev/null)"
+			is_uint "$pc" && pkt_sum=$((pkt_sum + pc))
+			is_uint "$pd" && drop_sum=$((drop_sum + pd))
+		fi
+		q=$((q + 1))
+	done
+	printf '%s %s\n' "$pkt_sum" "$drop_sum"
+}
+
+json_escape() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n' ' '
+}
+
+do_json() {
+	local wan_dev wan_mode st_active hook_raw hook_on sqm_raw sqm_en qos_mode
+	local sch2 sch2_en sch2_alg sch2_rate sch3 sch3_en sch3_alg sch3_rate
+	local ul_prio ul_prio_pkt ul_prio_drop ul_bulk ul_bulk_pkt ul_bulk_drop
+	local dl_prio dl_prio_pkt dl_prio_drop dl_bulk dl_bulk_pkt dl_bulk_drop
+	local cake_line conflict_flag=0
+
+	load_config
+	wan_dev="$(detect_wan_dev "$CFG_WAN_IF")"
+	wan_mode="$(classify_wan_mode "$wan_dev")"
+	st_active="$(read_state_var active)"
+	: "${st_active:=0}"
+	conflict_qos_active && conflict_flag=1
+
+	hook_on=0
+	if [ -r "$HNAT_DIR/hook_toggle" ]; then
+		hook_raw="$(tr -d ' \t\r\n' < "$HNAT_DIR/hook_toggle" 2>/dev/null)"
+		case "$hook_raw" in
+			1|enabled|enable|on|true) hook_on=1 ;;
+		esac
+	fi
+
+	sqm_en=0
+	qos_mode=0
+	if [ -r "$HNAT_DIR/sqm_toggle" ]; then
+		sqm_raw="$(cat "$HNAT_DIR/sqm_toggle" 2>/dev/null)"
+		sqm_en="$(printf '%s\n' "$sqm_raw" | sed -n 's/.*enabled=\([0-9]*\).*/\1/p' | head -n 1)"
+		qos_mode="$(printf '%s\n' "$sqm_raw" | sed -n 's/.*qos_toggle=\([0-9]*\).*/\1/p' | head -n 1)"
+	fi
+	: "${sqm_en:=0}"
+	: "${qos_mode:=0}"
+
+	sch2="$(read_sch_summary 2)"
+	sch2_en="$(printf '%s' "$sch2" | awk '{print $1}')"
+	sch2_alg="$(printf '%s' "$sch2" | awk '{print $2}')"
+	sch2_rate="$(printf '%s' "$sch2" | awk '{print $3}')"
+
+	sch3="$(read_sch_summary 3)"
+	sch3_en="$(printf '%s' "$sch3" | awk '{print $1}')"
+	sch3_alg="$(printf '%s' "$sch3" | awk '{print $2}')"
+	sch3_rate="$(printf '%s' "$sch3" | awk '{print $3}')"
+
+	ul_prio="$(sum_queue_range 16 16)"
+	ul_prio_pkt="$(printf '%s' "$ul_prio" | awk '{print $1}')"
+	ul_prio_drop="$(printf '%s' "$ul_prio" | awk '{print $2}')"
+
+	ul_bulk="$(sum_queue_range 17 31)"
+	ul_bulk_pkt="$(printf '%s' "$ul_bulk" | awk '{print $1}')"
+	ul_bulk_drop="$(printf '%s' "$ul_bulk" | awk '{print $2}')"
+
+	dl_prio="$(sum_queue_range 48 48)"
+	dl_prio_pkt="$(printf '%s' "$dl_prio" | awk '{print $1}')"
+	dl_prio_drop="$(printf '%s' "$dl_prio" | awk '{print $2}')"
+
+	dl_bulk="$(sum_queue_range 49 63)"
+	dl_bulk_pkt="$(printf '%s' "$dl_bulk" | awk '{print $1}')"
+	dl_bulk_drop="$(printf '%s' "$dl_bulk" | awk '{print $2}')"
+
+	cake_line=""
+	if command -v "$TC_BIN" >/dev/null 2>&1 && [ -d "$SYS_NET/$wan_dev" ]; then
+		cake_line="$("$TC_BIN" qdisc show dev "$wan_dev" 2>/dev/null | grep 'qdisc cake ' | head -n 1)"
+	fi
+
+	printf '{"enabled":%d,"active":%d,"conflict":%d,"wan_dev":"%s","wan_mode":"%s","download":%d,"upload":%d,"hook_toggle":%d,"sqm_toggle":%d,"qos_toggle":%d,"sch2":{"enabled":%d,"alg":"%s","rate":%d},"sch3":{"enabled":%d,"alg":"%s","rate":%d},"stats":{"ul_prio_pkt":%s,"ul_prio_drop":%s,"ul_bulk_pkt":%s,"ul_bulk_drop":%s,"dl_prio_pkt":%s,"dl_prio_drop":%s,"dl_bulk_pkt":%s,"dl_bulk_drop":%s},"cake":"%s"}\n' \
+		"$([ "$CFG_ENABLED" = "1" ] && echo 1 || echo 0)" \
+		"$(is_uint "$st_active" && echo "$st_active" || echo 0)" \
+		"$conflict_flag" \
+		"$(json_escape "$wan_dev")" \
+		"$(json_escape "$wan_mode")" \
+		"$(is_uint "$CFG_DL" && echo "$CFG_DL" || echo 0)" \
+		"$(is_uint "$CFG_UL" && echo "$CFG_UL" || echo 0)" \
+		"$hook_on" \
+		"$sqm_en" \
+		"$qos_mode" \
+		"$(is_uint "$sch2_en" && echo "$sch2_en" || echo 0)" \
+		"$(json_escape "$sch2_alg")" \
+		"$(is_uint "$sch2_rate" && echo "$sch2_rate" || echo 0)" \
+		"$(is_uint "$sch3_en" && echo "$sch3_en" || echo 0)" \
+		"$(json_escape "$sch3_alg")" \
+		"$(is_uint "$sch3_rate" && echo "$sch3_rate" || echo 0)" \
+		"$ul_prio_pkt" "$ul_prio_drop" \
+		"$ul_bulk_pkt" "$ul_bulk_drop" \
+		"$dl_prio_pkt" "$dl_prio_drop" \
+		"$dl_bulk_pkt" "$dl_bulk_drop" \
+		"$(json_escape "$cake_line")"
+}
+
+do_status() {
+	local j
+	j="$(do_json)"
+	printf '%s\n' "$j"
+	[ -r "$QDMA_DIR/qdma_sch2" ] && printf -- '--- qdma_sch2 ---\n' && cat "$QDMA_DIR/qdma_sch2"
+	[ -r "$QDMA_DIR/qdma_sch3" ] && printf -- '--- qdma_sch3 ---\n' && cat "$QDMA_DIR/qdma_sch3"
+	[ -r "$HNAT_DIR/sqm_toggle" ] && printf -- '--- sqm_toggle ---\n' && cat "$HNAT_DIR/sqm_toggle"
+}
+
+case "${1:-status}" in
+	start|apply|reload)
+		do_start
+		;;
+	stop)
+		do_stop
+		;;
+	json)
+		do_json
+		;;
+	status)
+		do_status
+		;;
+	*)
+		printf 'Usage: %s {start|stop|reload|apply|status|json}\n' "$0" >&2
+		exit 1
+		;;
+esac
