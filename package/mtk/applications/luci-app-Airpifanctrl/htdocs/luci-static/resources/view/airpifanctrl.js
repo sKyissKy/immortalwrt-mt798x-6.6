@@ -56,11 +56,6 @@ return view.extend({
 				mode: status.mode || 'smart',
 				stepless_pwm: String(status.stepless_pwm != null ? status.stepless_pwm : 192),
 				temp_id: status.temp_source || 'cpu'
-			},
-			config: {
-				mode: status.mode || 'smart',
-				stepless_pwm: String(status.stepless_pwm != null ? status.stepless_pwm : 192),
-				temp_id: status.temp_source || 'cpu'
 			}
 		};
 
@@ -130,7 +125,7 @@ return view.extend({
 			]);
 		};
 
-		s = m.section(form.NamedSection, 'config', 'cooling_control', _('Cooling Policy Settings'));
+		s = m.section(form.NamedSection, 'cooling_control', 'cooling_control', _('Cooling Policy Settings'));
 
 		var o = s.option(form.ListValue, 'mode', _('Operating Mode'));
 		o.value('stop', _('Silent Mode (PWM 64 / 25%)'));
@@ -161,8 +156,8 @@ return view.extend({
 	handleSaveApply: function(ev, mode) {
 		var viewSelf = this;
 		return this.map.save(null, true).then(function() {
-			var cfg = (viewSelf.formData && (viewSelf.formData.cooling_control || viewSelf.formData.config))
-				? (viewSelf.formData.cooling_control || viewSelf.formData.config) : {};
+			var cfg = (viewSelf.formData && viewSelf.formData.cooling_control)
+				? viewSelf.formData.cooling_control : {};
 			var targetMode = cfg.mode || 'smart';
 			var targetPwm = parseInt(cfg.stepless_pwm != null ? cfg.stepless_pwm : 192, 10);
 			var targetSource = cfg.temp_id || 'cpu';
@@ -171,10 +166,11 @@ return view.extend({
 			var initialMode = init.mode || 'smart';
 			var initialPwm = parseInt(init.stepless_pwm != null ? init.stepless_pwm : 192, 10);
 			var initialSource = init.temp_source || 'cpu';
+			var needsInit = (init.uninitialized === true);
 
 			var tasks = Promise.resolve();
 
-			if (targetSource !== initialSource) {
+			if (needsInit || targetSource !== initialSource) {
 				tasks = tasks.then(function() {
 					return callSetTempSource(targetSource).then(function(res) {
 						if (!res || res.code !== 0)
@@ -183,8 +179,8 @@ return view.extend({
 				});
 			}
 
-			if (targetMode !== initialMode || (targetMode === 'stepless' && targetPwm !== initialPwm)) {
-				var pwmArg = (targetMode === 'stepless') ? targetPwm : null;
+			if (needsInit || targetMode !== initialMode || (targetMode === 'stepless' && targetPwm !== initialPwm)) {
+				var pwmArg = (targetMode === 'stepless') ? targetPwm : undefined;
 				tasks = tasks.then(function() {
 					return callSetMode(targetMode, pwmArg).then(function(res) {
 						if (!res || res.code !== 0)
@@ -202,5 +198,8 @@ return view.extend({
 		}).catch(function(err) {
 			ui.addNotification(null, E('p', _('Failed to apply configuration: %s').format(err.message || err)), 'error');
 		});
-	}
+	},
+
+	handleSave: null,
+	handleReset: null
 });

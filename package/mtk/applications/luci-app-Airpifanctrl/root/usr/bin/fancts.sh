@@ -63,28 +63,76 @@ restore_kernel_thermal() {
     return 0
 }
 
+parse_qtemp_output() {
+    _best=
+    while IFS= read -r _line; do
+        case "$_line" in
+            *+QTEMP:*)
+                _val=$(printf '%s\n' "$_line" | sed -n 's/.*"\([-+0-9.]*\)"[[:space:]]*$/\1/p')
+                [ -n "$_val" ] || _val=$(printf '%s\n' "$_line" | sed -n 's/.*,[[:space:]]*\([-+0-9.]*\)[[:space:]]*$/\1/p')
+                _val=$(printf '%s' "$_val" | tr -d '\r ' | cut -d. -f1)
+                case "$_val" in
+                    ''|*[!0-9]*) continue ;;
+                esac
+                if [ "$_val" -gt 0 ] 2>/dev/null && [ "$_val" -le 130 ] 2>/dev/null; then
+                    if [ -z "$_best" ] || [ "$_val" -gt "$_best" ] 2>/dev/null; then
+                        _best="$_val"
+                    fi
+                fi
+                ;;
+        esac
+    done
+    if [ -n "$_best" ]; then
+        printf '%s\n' "$((_best * 1000))"
+        return 0
+    fi
+    return 1
+}
+
+parse_chiptemp_output() {
+    _raw=$(grep 'CHIPTEMP' | sed -n '1p' | cut -d, -f9 | sed '/^$/d' | tr -d '\r ' | cut -d. -f1)
+    case "$_raw" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$_raw" -gt 0 ] 2>/dev/null || return 1
+    if [ "$_raw" -le 150 ]; then
+        _raw=$((_raw * 1000))
+    elif [ "$_raw" -le 1500 ]; then
+        _raw=$((_raw * 100))
+    fi
+    printf '%s\n' "$_raw"
+}
+
 read_valid_temp() {
     temp_source_conf="${FANCTRL_ROOT}/etc/fanvallv.conf"
     temp=
     if [ -r "$temp_source_conf" ]; then
         temp_source_val=$(tr -d '\r\n ' < "$temp_source_conf" 2>/dev/null || true)
         if [ "$temp_source_val" = "modem" ]; then
-            if [ -e "${FANCTRL_ROOT}/dev/ttyUSB1" ] || [ -e "/dev/ttyUSB1" ]; then
-                temp=$(sendat 1 'AT^CHIPTEMP?' 2>/dev/null | grep 'CHIPTEMP' | sed -n '1p' | cut -d, -f9 | sed '/^$/d' | tr -d '\r ' | cut -d. -f1)
-                case "$temp" in
-                    ''|*[!0-9]*) temp= ;;
-                    *)
-                        if [ "$temp" -gt 0 ] 2>/dev/null; then
-                            if [ "$temp" -le 150 ]; then
-                                temp=$((temp * 1000))
-                            elif [ "$temp" -le 1500 ]; then
-                                temp=$((temp * 100))
-                            fi
-                        else
-                            temp=
-                        fi
-                        ;;
-                esac
+            _at_ports=
+            if [ -r "${FANCTRL_ROOT}/etc/config/qmodem" ]; then
+                _at_ports=$(sed -n "s/.*option[[:space:]]\{1,\}at_port[[:space:]]\{1,\}['\"]\{0,1\}\([^'\"[:space:]]\{1,\}\)['\"]\{0,1\}.*/\1/p" "${FANCTRL_ROOT}/etc/config/qmodem" 2>/dev/null)
+            fi
+            for _cand in $_at_ports /dev/ttyUSB3 /dev/ttyUSB2 /dev/ttyUSB1 /dev/mhi_DUN; do
+                _dev="${FANCTRL_ROOT}${_cand}"
+                [ -e "$_dev" ] || continue
+                if [ -x "${FANCTRL_ROOT}/usr/bin/sms_tool" ]; then
+                    temp=$("${FANCTRL_ROOT}/usr/bin/sms_tool" -d "$_dev" at 'AT+QTEMP' 2>/dev/null | parse_qtemp_output) || true
+                    [ -n "$temp" ] && break
+                    temp=$("${FANCTRL_ROOT}/usr/bin/sms_tool" -d "$_dev" at 'AT^CHIPTEMP?' 2>/dev/null | parse_chiptemp_output) || true
+                    [ -n "$temp" ] && break
+                elif [ -z "${FANCTRL_ROOT}" ] && command -v sms_tool >/dev/null 2>&1; then
+                    temp=$(sms_tool -d "$_dev" at 'AT+QTEMP' 2>/dev/null | parse_qtemp_output) || true
+                    [ -n "$temp" ] && break
+                    temp=$(sms_tool -d "$_dev" at 'AT^CHIPTEMP?' 2>/dev/null | parse_chiptemp_output) || true
+                    [ -n "$temp" ] && break
+                fi
+            done
+            if [ -z "$temp" ] && command -v sendat >/dev/null 2>&1; then
+                if [ -e "${FANCTRL_ROOT}/dev/ttyUSB1" ] || [ -e "/dev/ttyUSB1" ]; then
+                    temp=$(sendat 1 'AT+QTEMP' 2>/dev/null | parse_qtemp_output) || true
+                    [ -n "$temp" ] || temp=$(sendat 1 'AT^CHIPTEMP?' 2>/dev/null | parse_chiptemp_output) || true
+                fi
             fi
         fi
     fi

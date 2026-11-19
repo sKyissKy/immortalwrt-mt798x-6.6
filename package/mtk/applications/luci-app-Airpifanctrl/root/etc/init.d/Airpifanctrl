@@ -1,6 +1,6 @@
 #!/bin/sh /etc/rc.common
 START=99
-EXTRA_COMMANDS="worker_event"
+EXTRA_COMMANDS="worker_event running"
 
 run_ctl() {
 	local script="/usr/libexec/rpcd/luci.airpifanctrl"
@@ -15,5 +15,6 @@ stop()         { run_ctl stop; }
 restart()      { run_ctl restart; }
 reload()       { run_ctl restart; }
 worker_event() { run_ctl worker_event "$1"; }
+running()      { return 0; }
 
 [ -z "$initscript" ] && [ -n "$1" ] && { "$@"; exit $?; }

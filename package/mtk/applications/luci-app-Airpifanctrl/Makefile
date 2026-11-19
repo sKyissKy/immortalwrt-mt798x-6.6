@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-Airpifanctrl
 PKG_VERSION:=2.0
-PKG_RELEASE:=5
+PKG_RELEASE:=6
 
 LUCI_TITLE:=LuCI JS Support for Airpi PWM Fan Control
 LUCI_PKGARCH:=all

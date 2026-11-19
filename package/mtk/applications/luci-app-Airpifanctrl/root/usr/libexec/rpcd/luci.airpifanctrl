@@ -73,7 +73,7 @@ function acquire_control_lock(timeout_ms) {
 			return fh;
 		if (elapsed >= timeout_ms)
 			break;
-		system('sleep 0.05');
+		sleep(50);
 		elapsed += 50;
 	}
 	fh.close();
@@ -649,7 +649,7 @@ function stop_worker_locked() {
 			}
 		}
 
-		system('sleep 0.05');
+		sleep(50);
 	}
 
 	return false;
@@ -666,15 +666,52 @@ function parse_cpu_temp() {
 	return 0;
 }
 
-function parse_modem_temp() {
-	let pipe = fs.popen("sendat 1 'AT^CHIPTEMP?' 2>/dev/null", 'r');
-	let output = '';
-	if (pipe) {
-		output = pipe.read('all') || '';
-		pipe.close();
+function detect_modem_at_ports() {
+	let ports = [];
+	let seen = {};
+	let add_port = function(p) {
+		if (!p || p == '' || seen[p] || !match(p, /^\/[A-Za-z0-9_\/\.\-]+$/))
+			return;
+		let fp = rpath(p);
+		if (fs.access(fp)) {
+			seen[p] = true;
+			push(ports, fp);
+		}
+	};
+
+	let qcfg = rpath('/etc/config/qmodem');
+	if (fs.access(qcfg, 'r')) {
+		let txt = fs.readfile(qcfg) || '';
+		for (let line in split(txt, /\r?\n/)) {
+			let m = match(line, /option\s+at_port\s+['"]?([^'"\s]+)['"]?/);
+			if (m)
+				add_port(m[1]);
+		}
 	}
 
-	for (let line in split(output, /\r?\n/)) {
+	for (let p in ['/dev/ttyUSB3', '/dev/ttyUSB2', '/dev/ttyUSB1', '/dev/mhi_DUN'])
+		add_port(p);
+
+	return ports;
+}
+
+function parse_qtemp_max(output) {
+	let best = null;
+	for (let line in split(output || '', /\r?\n/)) {
+		if (index(line, '+QTEMP:') < 0)
+			continue;
+		let m = match(line, /([+-]?[0-9]+(\.[0-9]+)?)"?\s*$/);
+		if (!m)
+			continue;
+		let v = +m[1];
+		if (v > 0 && v <= 130 && (best == null || v > best))
+			best = v;
+	}
+	return best;
+}
+
+function parse_chiptemp_val(output) {
+	for (let line in split(output || '', /\r?\n/)) {
 		if (index(line, 'CHIPTEMP') < 0)
 			continue;
 
@@ -697,8 +734,52 @@ function parse_modem_temp() {
 				return int((num / 100.0) + 0.5) / 10.0;
 			if (num > 150)
 				return num / 10.0;
-			return num;
+			if (num > 0)
+				return num;
 		}
+	}
+	return null;
+}
+
+function run_cmd_capture(cmd) {
+	let pipe = fs.popen(cmd, 'r');
+	if (!pipe)
+		return '';
+	let output = pipe.read('all') || '';
+	pipe.close();
+	return output;
+}
+
+function parse_modem_temp() {
+	let sms_bin = fs.access(rpath('/usr/bin/sms_tool'), 'x')
+		? rpath('/usr/bin/sms_tool')
+		: ((ROOT == '' && fs.access('/usr/bin/sms_tool', 'x')) ? '/usr/bin/sms_tool' : null);
+	if (sms_bin) {
+		for (let p in detect_modem_at_ports()) {
+			let q_out = run_cmd_capture(`'${sms_bin}' -d '${p}' at 'AT+QTEMP' 2>/dev/null`);
+			let q_val = parse_qtemp_max(q_out);
+			if (q_val != null)
+				return q_val;
+
+			let c_out = run_cmd_capture(`'${sms_bin}' -d '${p}' at 'AT^CHIPTEMP?' 2>/dev/null`);
+			let c_val = parse_chiptemp_val(c_out);
+			if (c_val != null)
+				return c_val;
+		}
+	}
+
+	if (ROOT == '' || fs.access(rpath('/usr/bin/sendat'), 'x')) {
+		for (let idx in ['1', '2']) {
+			let q_out = run_cmd_capture(`sendat ${idx} 'AT+QTEMP' 2>/dev/null`);
+			let q_val = parse_qtemp_max(q_out);
+			if (q_val != null)
+				return q_val;
+		}
+
+		let c_out = run_cmd_capture("sendat 1 'AT^CHIPTEMP?' 2>/dev/null");
+		let c_val = parse_chiptemp_val(c_out);
+		if (c_val != null)
+			return c_val;
 	}
 
 	return parse_cpu_temp();
@@ -736,8 +817,9 @@ function wait_ready_locked(generation, pwm_node) {
 	if (!pwm_node)
 		return { ready: false, pwm1: null };
 
-	for (let i = 0; i < 25; i++) {
-		system('sleep 0.05');
+	let deadline = stop_clock_ms() + 5000;
+	while (stop_clock_ms() < deadline) {
+		sleep(50);
 		let ready_pid = readfile_trim('/var/run/cooling_control.ready');
 		if (!ready_pid || !match(ready_pid, /^[0-9]+$/))
 			continue;
@@ -1440,6 +1522,8 @@ const methods = {
 			let fansttp = is_modem ? parse_modem_temp() : parse_cpu_temp();
 
 			let err_state = readfile_trim('/var/run/cooling_control.error') || '';
+			let uninitialized = !fs.access(rpath('/etc/fanvall')) ||
+					    !fs.access(rpath('/var/run/cooling_control.ready'));
 
 			let lucimsg = '';
 			if (fs.access(rpath('/tmp/lucimsg.file'))) {
@@ -1458,6 +1542,7 @@ const methods = {
 				fansv: fansv,
 				temp_source: temp_source,
 				fansttp: fansttp,
+				uninitialized: uninitialized,
 				lucimsg: lucimsg,
 				error: err_state
 			}));
