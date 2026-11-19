@@ -103,10 +103,19 @@ choice
 endchoice
 endif
 
-config MTK_HWIFI_FW_BE14000
-	bool "BE14000 custom firmware support"
-	depends on ! MTK_HWIFI_FW_HDR_SUPPORT
-	default n
+choice
+	prompt "MT7990 custom firmware profile"
+	optional
+	depends on MTK_HWIFI_MT7990
+
+	config MTK_HWIFI_FW_BE19000
+		bool "BE19000 custom firmware support"
+		depends on ! MTK_HWIFI_FW_HDR_SUPPORT
+
+	config MTK_HWIFI_FW_BE14000
+		bool "BE14000 custom firmware support"
+		depends on ! MTK_HWIFI_FW_HDR_SUPPORT
+endchoice
 
 if MTK_HWIFI_FW_BE14000
 choice
@@ -120,11 +129,6 @@ choice
 	bool "BE14000-20260311"
 endchoice
 endif
-
-config MTK_HWIFI_FW_BE19000
-	bool "BE19000 custom firmware support"
-	depends on ! MTK_HWIFI_FW_HDR_SUPPORT
-	default n
 
 if MTK_HWIFI_FW_BE19000
 choice
