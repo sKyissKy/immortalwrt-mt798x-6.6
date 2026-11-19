@@ -37,4 +37,15 @@ case "$DISTRIB_TARGET" in
 	;;
 esac
 
+idx=0
+while uci -q get "network.@device[$idx]" > "/dev/null"; do
+	if [ "$(uci -q get "network.@device[$idx].name")" = "hnat" ]; then
+		if [ "$(uci -q get "network.@device[$idx].learning")" != "0" ]; then
+			uci -q set "network.@device[$idx].learning=0"
+			uci -q commit network
+		fi
+	fi
+	idx=$((idx + 1))
+done
+
 exit 0
