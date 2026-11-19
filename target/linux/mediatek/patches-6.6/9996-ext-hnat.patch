@@ -72,7 +72,7 @@
  		skb_record_rx_queue(skb, 0);
  		napi_gro_receive(napi, skb);
  
-@@ -4268,9 +4289,6 @@ static int mtk_open(struct net_device *d
+@@ -4428,9 +4428,6 @@ static int mtk_open(struct net_device *d
  			}
  			mtk_gdm_config(eth, target_mac->id, gdm_config);
  		}
@@ -80,18 +80,8 @@
 -		mtk_w32(eth, RST_GL_PSE, MTK_RST_GL);
 -		mtk_w32(eth, 0, MTK_RST_GL);
  
- 		napi_enable(&eth->tx_napi);
- 		napi_enable(&eth->rx_napi[0].napi);
-@@ -5917,7 +5935,8 @@ static u16 mtk_select_queue(struct net_d
- 		queue = skb_get_queue_mapping(skb) + 3;
- 	else
- 		queue = mac->id;
--
-+	
-+	
- 	if (queue >= dev->num_tx_queues)
- 		queue = 0;
- 
+ 		mtu = mtk_max_gmac_mtu(eth);
+ 		for (i = 0; i < ARRAY_SIZE(eth->ppe); i++)
 --- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
 +++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
 @@ -1484,6 +1484,7 @@ struct mtk_tx_dma_desc_info {

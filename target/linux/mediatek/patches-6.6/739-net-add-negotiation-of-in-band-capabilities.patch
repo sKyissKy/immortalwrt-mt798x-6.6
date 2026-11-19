@@ -525,15 +525,9 @@ publishing the in-band capabilities from the BCM84881 PHY driver.
  		case MLO_AN_PHY:
  			link_state = pl->phy_state;
  			phylink_apply_manual_flow(pl, &link_state);
-@@ -1773,7 +1961,7 @@ struct phylink *phylink_create(struct ph
- 		}
- 	}
- 
+@@ -1773 +1961 @@ struct phylink *phylink_create(struct ph
 -	pl->cur_link_an_mode = pl->cfg_link_an_mode;
 +	pl->req_link_an_mode = pl->cfg_link_an_mode;
- 
- 	ret = phylink_register_sfp(pl, fwnode);
- 	if (ret < 0) {
 @@ -2236,7 +2424,7 @@ void phylink_start(struct phylink *pl)
  	ASSERT_RTNL();
  

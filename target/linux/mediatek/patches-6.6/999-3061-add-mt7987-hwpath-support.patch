@@ -23,8 +23,8 @@ Subject: [PATCH] add mt7987 hwpath support
  
  static struct mtk_wed_hw *hw_list[3];
  static DEFINE_MUTEX(hw_lock);
-@@ -64,9 +65,11 @@ static const struct mtk_wed_soc_data mt7
- 		.wpdma_rx_ring1		= 0,
+@@ -66,9 +66,11 @@
+ 		},
  		.reset_idx_tx_mask	= GENMASK(3, 0),
  		.reset_idx_rx_mask	= GENMASK(17, 16),
 +		.msdu_pg_ring2_cfg	= 0,
@@ -35,8 +35,8 @@ Subject: [PATCH] add mt7987 hwpath support
  };
  
  static const struct mtk_wed_soc_data mt7986_data = {
-@@ -77,9 +80,11 @@ static const struct mtk_wed_soc_data mt7
- 		.wpdma_rx_ring1		= 0,
+@@ -80,9 +82,11 @@
+ 		},
  		.reset_idx_tx_mask	= GENMASK(1, 0),
  		.reset_idx_rx_mask	= GENMASK(7, 6),
 +		.msdu_pg_ring2_cfg	= 0,
@@ -47,8 +47,8 @@ Subject: [PATCH] add mt7987 hwpath support
  };
  
  static const struct mtk_wed_soc_data mt7988_data = {
-@@ -90,9 +95,25 @@ static const struct mtk_wed_soc_data mt7
- 		.wpdma_rx_ring1		= 0x7d8,
+@@ -95,9 +99,27 @@
+ 		},
  		.reset_idx_tx_mask	= GENMASK(1, 0),
  		.reset_idx_rx_mask	= GENMASK(7, 6),
 +		.msdu_pg_ring2_cfg	= 0xe58,
@@ -62,7 +62,9 @@ Subject: [PATCH] add mt7987 hwpath support
 +	.regmap = {
 +		.wed_rev_id		= 0x4,
 +		.tx_bm_tkid		= 0x0c8,
-+		.wpdma_rx_ring0		= 0,
++		.wpdma_rx_ring = {
++			0,
++		},
 +		.reset_idx_tx_mask	= GENMASK(1, 0),
 +		.reset_idx_rx_mask	= GENMASK(7, 6),
 +		.msdu_pg_ring2_cfg	= 0xe2c,
@@ -150,7 +152,7 @@ Subject: [PATCH] add mt7987 hwpath support
 +		}
  	}
 -
- 	/* eagle E1 PCIE1 tx ring 22 flow control issue */
+ 	/* Kite and Eagle E1 PCIE1 tx ring 22 flow control issue */
  	if (dev->wlan.id == 0x7991 || dev->wlan.id == 0x7992)
  		wed_clr(dev, MTK_WED_AMSDU_FIFO, MTK_WED_AMSDU_IS_PRIOR0_RING);
 @@ -638,7 +668,10 @@ mtk_wed_tx_buffer_alloc(struct mtk_wed_d
@@ -1366,8 +1368,8 @@ Subject: [PATCH] add mt7987 hwpath support
  			goto unlock;
 --- a/drivers/net/ethernet/mediatek/mtk_wed.h
 +++ b/drivers/net/ethernet/mediatek/mtk_wed.h
-@@ -22,9 +22,11 @@ struct mtk_wed_soc_data {
- 		u32 wpdma_rx_ring1;
+@@ -21,9 +21,11 @@
+ 		u32 wpdma_rx_ring[MTK_WED_RX_QUEUES];
  		u32 reset_idx_tx_mask;
  		u32 reset_idx_rx_mask;
 +		u32 msdu_pg_ring2_cfg;
@@ -1718,7 +1720,7 @@ Subject: [PATCH] add mt7987 hwpath support
  
  	struct {
  		int size;
-@@ -144,15 +159,16 @@ struct mtk_wed_device {
+@@ -159,15 +159,16 @@
  		u32 wpdma_phys;
  		u32 wpdma_int;
  		u32 wpdma_mask;
@@ -1735,8 +1737,8 @@ Subject: [PATCH] add mt7987 hwpath support
 -		bool hw_rro;
 +		enum mtk_wed_hwrro_mode hw_rro;
  		bool msi;
+ 		bool hif2;
  
- 		u16 token_start;
 @@ -167,6 +183,7 @@ struct mtk_wed_device {
  		u8 rro_rx_tbit[MTK_WED_RX_QUEUES];
  		u8 rx_pg_tbit[MTK_WED_RX_PAGE_QUEUES];
