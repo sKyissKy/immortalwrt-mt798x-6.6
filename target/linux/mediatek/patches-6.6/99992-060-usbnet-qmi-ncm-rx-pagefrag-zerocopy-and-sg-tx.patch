@@ -25,9 +25,9 @@ index 0c28301..a14a76f 100644
 -			skb_put_data(skb, skb_in->data + offset, len);
 +			const u8 *pkt_ptr = skb_in->data + offset;
 +
-+			if (skb_in->head_frag && !skb_is_nonlinear(skb_in) && len > 256) {
++			if (skb_in->head_frag && !skb_is_nonlinear(skb_in) && len > 2048) {
 +				struct page *head_page = virt_to_head_page(skb_in->head);
-+				unsigned int headroom = 32 + NET_IP_ALIGN;
++				unsigned int headroom = 48 + NET_IP_ALIGN;
 +				unsigned int frag_len = len - 128;
 +
 +				skb = __netdev_alloc_skb(dev->net, headroom + 128, GFP_ATOMIC);
@@ -98,8 +98,8 @@ index 2978a72..efad020 100644
  
 -		skb_reserve(skbn, LL_MAX_HEADER);
 -		skb_put_data(skbn, skb->data + offset + qmimux_hdr_sz, pkt_len);
-+		headroom = max_t(unsigned int, LL_MAX_HEADER, 32U);
-+		if (skb->head_frag && !skb_is_nonlinear(skb) && pkt_len > 256) {
++		headroom = max_t(unsigned int, LL_MAX_HEADER, 48U);
++		if (skb->head_frag && !skb_is_nonlinear(skb) && pkt_len > 2048) {
 +			struct page *head_page = virt_to_head_page(skb->head);
 +			unsigned int frag_len = pkt_len - 128;
 +

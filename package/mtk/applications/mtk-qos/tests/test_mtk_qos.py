@@ -1,0 +1,361 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+
+import json
+import os
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+PKG_DIR = Path(__file__).resolve().parent.parent
+SCRIPT = PKG_DIR / "files" / "mtk-qos"
+RENDER_UC = PKG_DIR / "files" / "render-nft.uc"
+
+
+class FakeSysEnv:
+    def __init__(self, tmp: Path):
+        self.root = tmp
+        self.bin_dir = tmp / "bin"
+        self.uci_dir = tmp / "etc_config"
+        self.qdma_dir = tmp / "qdma"
+        self.hnat_dir = tmp / "hnat"
+        self.pce_dir = tmp / "pce"
+        self.dt_compat = tmp / "dt_compatible"
+        self.sys_net = tmp / "sys_net"
+        self.sys_mod = tmp / "sys_mod"
+        self.run_dir = tmp / "run"
+        self.leases = tmp / "dhcp.leases"
+        self.arp = tmp / "arp"
+        self.logs = tmp / "logs"
+
+        for d in [
+            self.bin_dir,
+            self.uci_dir,
+            self.qdma_dir,
+            self.hnat_dir,
+            self.pce_dir,
+            self.sys_net,
+            self.sys_mod,
+            self.run_dir,
+            self.logs,
+        ]:
+            d.mkdir(parents=True, exist_ok=True)
+
+        self.leases.write_text("1700000000 aa:bb:cc:dd:ee:02 192.168.59.66 nas *\n")
+        self.arp.write_text(
+            "IP address       HW type     Flags       HW address            Mask     Device\n"
+            "192.168.59.88    0x1         0x2         aa:bb:cc:dd:ee:03     *        br-lan\n"
+        )
+        (self.sys_net / "br-lan").mkdir(exist_ok=True)
+        (self.sys_net / "eth0").mkdir(exist_ok=True)
+        (self.sys_net / "eth1").mkdir(exist_ok=True)
+        (self.sys_net / "wwan0_1").mkdir(exist_ok=True)
+        (self.sys_mod / "nft_connlimit").mkdir(exist_ok=True)
+        (self.sys_mod / "mtk_wed").mkdir(exist_ok=True)
+
+        for sch in (2, 3):
+            (self.qdma_dir / f"qdma_sch{sch}").write_text(
+                "EN\tScheduling\tMAX\tQueue#\n0\tWRR\t\t0\t\n"
+            )
+        for q in range(64):
+            (self.qdma_dir / f"qdma_txq{q}").write_text(
+                "scheduler: 0\npacket count: 0\npacket drop: 0\n"
+            )
+        for fname, content in {
+            "hook_toggle": "enabled\n",
+            "qos_toggle": "0\n",
+            "sqm_toggle": "enabled=0 dpi=1 ul_eqos=1..15 ul_sqm=16..31 dl_eqos=33..47 dl_sqm=48..63 qos_toggle=0 ul=0 dl=0\n",
+            "qos_dpi": "enabled=1 realtime_pkts=10 fair_pkts=20 video_pkts=5 p2p_pkts=2 eqos_flows=1\n",
+            "hnat_setting": "11 30\n",
+            "all_entry": "state=BIND\nstate=BIND\nstate=UNBIND\n",
+        }.items():
+            (self.hnat_dir / fname).write_text(content)
+        (self.pce_dir / "cls_entry").write_text("")
+
+        self.uci_kv = {
+            "mtk_qos.global.enabled": "1",
+            "mtk_qos.global.sqm_enabled": "1",
+            "mtk_qos.global.eqos_enabled": "1",
+            "mtk_qos.global.dpi_enabled": "1",
+            "mtk_qos.global.pce_enabled": "1",
+            "mtk_qos.global.fast_bind_pkt": "5",
+            "mtk_qos.global.wan_mode": "auto",
+            "mtk_qos.global.interface": "auto",
+            "mtk_qos.global.download_kbps": "300000",
+            "mtk_qos.global.upload_kbps": "50000",
+            "mtk_qos.global.scheduler": "wrr",
+            "mtk_qos.global.overhead": "8",
+            "mtk_qos.global.realtime_pct": "25",
+            "mtk_qos.global.video_pct": "45",
+            "mtk_qos.global.p2p_pct": "15",
+            "mtk_qos.global.ack_prio": "1",
+            "mtk_qos.global.cake_diffserv": "diffserv4",
+            "mtk_qos.global.cake_ack_filter": "1",
+        }
+        self.routes = "default via 192.168.1.1 dev eth1 metric 10\n"
+        self.install_shims()
+
+    def sync_uci(self):
+        (self.logs / "uci.json").write_text(json.dumps(self.uci_kv))
+        (self.logs / "routes.txt").write_text(self.routes)
+
+    def install_shims(self):
+        uci_sh = f"""#!/usr/bin/env python3
+import json, sys
+kv = json.loads(open({str(self.logs / 'uci.json')!r}).read())
+args = sys.argv[1:]
+while args and args[0] in ('-q', '-c'):
+    args = args[2:] if args[0] == '-c' else args[1:]
+if len(args) >= 2 and args[0] == 'get':
+    val = kv.get(args[1])
+    if val is None:
+        sys.exit(1)
+    print(val)
+"""
+        ip_sh = f"""#!/bin/sh
+printf '%s\\n' "$*" >> {str(self.logs / 'ip.log')!r}
+case "$*" in
+  *"route show default"*) cat {str(self.logs / 'routes.txt')!r} ;;
+esac
+"""
+        rec_sh = lambda name: f"""#!/bin/sh
+printf '%s\\n' "$*" >> {str(self.logs / (name + '.log'))!r}
+"""
+        ucode_sh = f"""#!/usr/bin/env python3
+import json, pathlib, re, sys
+args = sys.argv[1:]
+kv = json.loads(open({str(self.logs / 'uci.json')!r}).read())
+opts = {{}}
+i = 1
+while i < len(args):
+    if args[i].startswith('--') and i + 1 < len(args):
+        opts[args[i][2:]] = args[i + 1]
+        i += 2
+    else:
+        i += 1
+wan_devs = [x.strip() for x in opts.get('wan-devs', 'eth1').split(',') if x.strip()]
+lan_devs = [x.strip() for x in opts.get('lan-devs', 'br-lan').split(',') if x.strip()]
+wan_expr = '{{ ' + ', '.join(f'"{{d}}"' for d in wan_devs) + ' }}' if len(wan_devs) > 1 else f'"{{wan_devs[0]}}"'
+lan_expr = '{{ ' + ', '.join(f'"{{d}}"' for d in lan_devs) + ' }}' if len(lan_devs) > 1 else f'"{{lan_devs[0]}}"'
+lines = [
+    'table inet mtk_qos',
+    'delete table inet mtk_qos',
+    'table inet mtk_qos {{',
+    '\\tchain forward {{',
+    '\\t\\ttype filter hook forward priority mangle; policy accept;',
+    f'\\t\\toifname {{wan_expr}} tcp flags syn / syn,rst tcp option maxseg size set rt mtu',
+    f'\\t\\tiifname {{wan_expr}} tcp flags syn / syn,rst tcp option maxseg size set rt mtu',
+]
+slots = []
+if kv.get('mtk_qos.global.enabled') == '1' and kv.get('mtk_qos.global.eqos_enabled', '1') != '0':
+    leases = {{}}
+    for line in pathlib.Path(opts['leases']).read_text().splitlines():
+        p = line.split()
+        if len(p) >= 3:
+            leases[p[1].lower()] = p[2]
+    dev_ids = sorted({{k.split('.')[1] for k in kv if k.startswith('mtk_qos.dev')}})
+    for slot, did in enumerate(dev_ids, 1):
+        if kv.get(f'mtk_qos.{{did}}.enabled', '1') == '0':
+            continue
+        ip = kv.get(f'mtk_qos.{{did}}.ip', '')
+        mac = kv.get(f'mtk_qos.{{did}}.mac', '').lower()
+        if not ip and mac in leases:
+            ip = leases[mac]
+        ul = int(kv.get(f'mtk_qos.{{did}}.upload_kbps', '0') or 0)
+        dl = int(kv.get(f'mtk_qos.{{did}}.download_kbps', '0') or 0)
+        mc = int(kv.get(f'mtk_qos.{{did}}.max_conn', '0') or 0)
+        if not (ip or mac):
+            continue
+        comment = (kv.get(f'mtk_qos.{{did}}.comment', '') or '').replace('|', ' ')
+        slots.append(f"{{slot}}|{{ul}}|{{dl}}|{{mc}}|{{ip}}|{{mac}}|{{comment}}")
+        if mc > 0 and opts.get('with-connlimit') == '1' and ip:
+            lines.append(f'\\t\\toifname {{wan_expr}} ip saddr {{ip}} ct state new ct count over {{mc}} counter drop')
+        if ul > 0 and ip:
+            lines.append(f'\\t\\tiifname {{lan_expr}} oifname {{wan_expr}} ip saddr {{ip}} meta mark set {{slot}}')
+        if ul > 0 and mac:
+            lines.append(f'\\t\\tiifname {{lan_expr}} oifname {{wan_expr}} ether saddr {{mac}} meta mark set {{slot}}')
+        if dl > 0 and ip:
+            lines.append(f'\\t\\tiifname {{wan_expr}} oifname {{lan_expr}} ip daddr {{ip}} meta mark set {{32 + slot}}')
+lines.extend(['\\t}}', '}}'])
+pathlib.Path(opts['out-nft']).write_text('\\n'.join(lines) + '\\n')
+pathlib.Path(opts['out-slots']).write_text(('\\n'.join(slots) + '\\n') if slots else '')
+"""
+        scripts = {
+            "uci": uci_sh,
+            "ip": ip_sh,
+            "tc": rec_sh("tc"),
+            "nft": rec_sh("nft"),
+            "sysctl": rec_sh("sysctl"),
+            "modprobe": rec_sh("modprobe"),
+            "ubus": "#!/bin/sh\necho '{}'\n",
+            "logger": "#!/bin/sh\nexit 0\n",
+            "ucode": ucode_sh,
+        }
+        for name, body in scripts.items():
+            p = self.bin_dir / name
+            p.write_text(body)
+            p.chmod(0o755)
+
+    def run(self, cmd="start"):
+        self.sync_uci()
+        env = os.environ.copy()
+        env["PATH"] = f"{self.bin_dir}:/usr/bin:/bin:/sbin:/usr/sbin"
+        env["MTK_QOS_UCI_BIN"] = str(self.bin_dir / "uci")
+        env["MTK_QOS_TC_BIN"] = str(self.bin_dir / "tc")
+        env["MTK_QOS_NFT_BIN"] = str(self.bin_dir / "nft")
+        env["MTK_QOS_UBUS_BIN"] = str(self.bin_dir / "ubus")
+        env["MTK_QOS_IP_BIN"] = str(self.bin_dir / "ip")
+        env["MTK_QOS_SYSCTL_BIN"] = str(self.bin_dir / "sysctl")
+        env["MTK_QOS_MODPROBE_BIN"] = str(self.bin_dir / "modprobe")
+        env["MTK_QOS_UCODE_BIN"] = str(self.bin_dir / "ucode")
+        env["MTK_QOS_RENDER_UC"] = str(RENDER_UC)
+        env["MTK_QOS_UCI_DIR"] = str(self.uci_dir)
+        env["MTK_QOS_LEASES_FILE"] = str(self.leases)
+        env["MTK_QOS_ARP_FILE"] = str(self.arp)
+        env["MTK_QOS_QDMA_DIR"] = str(self.qdma_dir)
+        env["MTK_QOS_HNAT_DIR"] = str(self.hnat_dir)
+        env["MTK_QOS_PCE_DIR"] = str(self.pce_dir)
+        env["MTK_QOS_DT_COMPAT"] = str(self.dt_compat)
+        env["MTK_QOS_SYS_NET"] = str(self.sys_net)
+        env["MTK_QOS_SYS_MOD"] = str(self.sys_mod)
+        env["MTK_QOS_RUN_DIR"] = str(self.run_dir)
+        return subprocess.run(
+            ["/bin/sh", str(SCRIPT), cmd],
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+
+class MtkQosTests(unittest.TestCase):
+    def test_1_wired_wan_simultaneous_4coproc(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            env.routes = "default via 100.64.0.1 dev eth1 metric 10\n"
+            env.uci_kv.update({
+                "mtk_qos.dev1.enabled": "1",
+                "mtk_qos.dev1.ip": "192.168.59.50",
+                "mtk_qos.dev1.upload_kbps": "10000",
+                "mtk_qos.dev1.download_kbps": "40000",
+                "mtk_qos.dev1.max_conn": "200",
+                "mtk_qos.dev1.comment": "host_note",
+            })
+            res = env.run("start")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual((env.qdma_dir / "qdma_txq1").read_text().strip(), "2 0 0 1 10000 4 4")
+            self.assertEqual((env.qdma_dir / "qdma_txq2").read_text().strip(), "0 0 0 0 0 4 4")
+            self.assertEqual((env.qdma_dir / "qdma_txq33").read_text().strip(), "3 0 0 1 40000 4 4")
+            j_wired = json.loads(env.run("json").stdout)
+            self.assertEqual(j_wired["eqos_slots"][0]["mac"], "")
+            self.assertEqual(j_wired["eqos_slots"][0]["comment"], "host_note")
+            self.assertEqual((env.hnat_dir / "hnat_setting").read_text().strip(), "11 5")
+            self.assertEqual((env.hnat_dir / "sqm_toggle").read_text().strip(), "1")
+            self.assertEqual((env.hnat_dir / "qos_toggle").read_text().strip(), "1")
+            cls = (env.pce_dir / "cls_entry").read_text().strip()
+            self.assertIn("sport 4 4", cls)
+            self.assertIn("fport 4", cls)
+            tc_log = (env.logs / "tc.log").read_text() if (env.logs / "tc.log").exists() else ""
+            self.assertNotIn("cake", tc_log)
+
+    def test_2_5g_wwan_zero_cpu_no_cake(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            env.routes = "default via 10.18.64.110 dev wwan0_1 metric 12\n"
+            env.uci_kv.update({
+                "mtk_qos.dev1.enabled": "1",
+                "mtk_qos.dev1.mac": "AA:BB:CC:DD:EE:02",
+                "mtk_qos.dev1.upload_kbps": "5000",
+                "mtk_qos.dev1.download_kbps": "25000",
+                "mtk_qos.dev1.max_conn": "150",
+            })
+            res = env.run("start")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            nft_txt = (env.run_dir / "mtk_qos.nft").read_text()
+            self.assertIn("ip daddr 192.168.59.66 meta mark set 33", nft_txt)
+            self.assertIn("meta mark set 1", nft_txt)
+            self.assertIn("ct count over 150", nft_txt)
+            tc_log = (env.logs / "tc.log").read_text() if (env.logs / "tc.log").exists() else ""
+            self.assertNotIn("cake", tc_log)
+            j = json.loads(env.run("json").stdout)
+            self.assertEqual(j["mode"], "coprocessor_4x")
+            self.assertEqual(j["wan_kind"], "cellular_5g")
+            self.assertEqual(j["wan_dev"], "wwan0_1")
+
+    def test_3_nft_lan_bypass_and_pppoe_lower_dev(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            (env.sys_net / "pppoe-wan").mkdir(exist_ok=True)
+            (env.sys_net / "pppoe-wan" / "lower_eth1").write_text("up\n")
+            env.routes = "default dev pppoe-wan metric 5\n"
+            env.uci_kv.update({
+                "mtk_qos.dev1.enabled": "1",
+                "mtk_qos.dev1.ip": "192.168.59.77",
+                "mtk_qos.dev1.upload_kbps": "8000",
+                "mtk_qos.dev1.download_kbps": "50000",
+            })
+            res = env.run("start")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            nft_txt = (env.run_dir / "mtk_qos.nft").read_text()
+            self.assertIn("pppoe-wan", nft_txt)
+            self.assertIn("eth1", nft_txt)
+            self.assertIn("oifname {", nft_txt)
+            self.assertIn('iifname "br-lan"', nft_txt)
+
+    def test_4_hook_toggle_0_cake_fallback(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            (env.hnat_dir / "hook_toggle").write_text("disabled\n")
+            env.routes = "default via 10.18.64.110 dev wwan0_1 metric 12\n"
+            res = env.run("start")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            tc_log = (env.logs / "tc.log").read_text()
+            self.assertIn("qdisc replace dev wwan0_1 root cake", tc_log)
+            self.assertIn("qdisc replace dev ifb4mtkqos root cake", tc_log)
+            j = json.loads(env.run("json").stdout)
+            self.assertEqual(j["mode"], "cake_fallback")
+
+    def test_5_stop_full_cleanup_and_rollback(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            env.uci_kv.update({
+                "mtk_qos.dev1.enabled": "1",
+                "mtk_qos.dev1.ip": "192.168.59.50",
+                "mtk_qos.dev1.upload_kbps": "10000",
+                "mtk_qos.dev1.download_kbps": "40000",
+            })
+            self.assertEqual(env.run("start").returncode, 0)
+            res = env.run("stop")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            self.assertEqual((env.hnat_dir / "sqm_toggle").read_text().strip(), "0")
+            self.assertEqual((env.hnat_dir / "qos_toggle").read_text().strip(), "0")
+            self.assertEqual((env.hnat_dir / "hnat_setting").read_text().strip(), "11 30")
+            self.assertEqual((env.qdma_dir / "qdma_sch2").read_text().strip(), "0 wrr 1000000")
+            self.assertEqual((env.pce_dir / "cls_entry").read_text().strip(), "31")
+            nft_log = (env.logs / "nft.log").read_text()
+            self.assertIn("delete table inet mtk_qos", nft_log)
+            self.assertFalse((env.run_dir / "state").exists())
+
+    def test_6_mt7987_skips_pce_and_prerebuild_guard(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            env.dt_compat.write_bytes(b"hiveton,h5000m\x00mediatek,mt7987\x00")
+            (env.pce_dir / "cls_entry").unlink()
+            env.routes = "default via 10.18.64.110 dev wwan0_1 metric 12\n"
+            res = env.run("start")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            modprobe_log = (env.logs / "modprobe.log").read_text() if (env.logs / "modprobe.log").exists() else ""
+            self.assertNotIn("pce", modprobe_log)
+            j = json.loads(env.run("json").stdout)
+            self.assertEqual(j["pce"]["supported"], 0)
+            self.assertEqual(j["pce"]["loaded"], 0)
+            self.assertEqual((env.hnat_dir / "qos_toggle").read_text().strip(), "1")
+
+            (env.hnat_dir / "qos_dpi").unlink()
+            res2 = env.run("start")
+            self.assertEqual(res2.returncode, 0, res2.stderr)
+            self.assertEqual((env.hnat_dir / "qos_toggle").read_text().strip(), "1 uplink")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

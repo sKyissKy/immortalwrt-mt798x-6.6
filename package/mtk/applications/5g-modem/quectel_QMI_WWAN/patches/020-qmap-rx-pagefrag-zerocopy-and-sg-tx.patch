@@ -517,10 +517,10 @@ Signed-off-by: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
 +					 unsigned int pkt_len,
 +					 unsigned int extra_headroom)
 +{
-+	unsigned int headroom = ETH_HLEN + 32 + extra_headroom;
++	unsigned int headroom = ETH_HLEN + 48 + extra_headroom;
 +	struct sk_buff *qmap_skb;
 +
-+	if (skb_in->head_frag && !skb_is_nonlinear(skb_in) && pkt_len > 256) {
++	if (skb_in->head_frag && !skb_is_nonlinear(skb_in) && pkt_len > 2048) {
 +		struct page *head_page = virt_to_head_page(skb_in->head);
 +		unsigned int frag_len = pkt_len - 128;
 +

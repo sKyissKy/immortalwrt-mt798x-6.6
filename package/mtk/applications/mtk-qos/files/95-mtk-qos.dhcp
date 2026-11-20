@@ -1,0 +1,11 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+
+case "$ACTION" in
+	add|update) ;;
+	*) exit 0 ;;
+esac
+
+[ "$(uci -q get mtk_qos.global.enabled 2>/dev/null)" = "1" ] || exit 0
+[ "$(uci -q get mtk_qos.global.eqos_enabled 2>/dev/null)" = "1" ] || exit 0
+/usr/sbin/mtk-qos reload >/dev/null 2>&1 || true
