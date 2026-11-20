@@ -1,0 +1,158 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] net: mediatek: handle oversized PPE force-to-CPU packets once
+
+The external-device handoff is reached via a PPE force-to-CPU reason
+or the equivalent HQoS marker. The late MTU check could return
+NF_ACCEPT after changing the packet view, even though the packet was
+already on the accelerated path.
+
+Check final L3 length before unsharing or removing the HQoS tag.
+Invalidate the bound entry and drop this exception so subsequent
+packets can be routed by Linux. Leave the ordinary handoff and QMI
+linearization behavior in place.
+
+Signed-off-by: Codex <codex@openai.com>
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -1992,12 +1992,15 @@
+ 	}
+ }
+ 
+-unsigned int do_hnat_ge_to_ext(struct sk_buff *skb, const char *func)
++static int do_hnat_ge_to_ext(struct sk_buff *skb, const char *func)
+ {
+ 	/* set where we to go */
+ 	u8 index;
+ 	struct foe_entry *entry;
+ 	struct net_device *dev;
++	unsigned int len = skb->len;
++	unsigned int mtu;
++	bool strip_hqos;
+ 	bool was_cloned;
+ 	bool skb_owned = false;
+ 
+@@ -2048,7 +2051,29 @@
+ 		return -1;
+ 	}
+ 
+-	if (IS_HQOS_MODE && eth_hdr(skb)->h_proto == HQOS_MAGIC_TAG) {
++	strip_hqos = IS_HQOS_MODE && eth_hdr(skb)->h_proto == HQOS_MAGIC_TAG;
++	if (strip_hqos) {
++		if (unlikely(len < VLAN_HLEN))
++			return -EINVAL;
++		len -= VLAN_HLEN;
++	}
++
++	mtu = READ_ONCE(dev->mtu);
++	if (unlikely(mtu && len > mtu)) {
++		/* PPE has already handled this packet. Invalidate the binding
++		 * so following packets can take the software forwarding path.
++		 */
++		spin_lock_bh(&hnat_priv->entry_lock);
++		if (entry_hnat_is_bound(entry)) {
++			entry->bfib1.state = INVALID;
++			dma_wmb();
++			hnat_cache_ebl(1);
++		}
++		spin_unlock_bh(&hnat_priv->entry_lock);
++		return -EMSGSIZE;
++	}
++
++	if (strip_hqos) {
+ 		was_cloned = skb_cloned(skb);
+ 		skb = skb_unshare(skb, GFP_ATOMIC);
+ 		if (!skb)
+@@ -2107,17 +2132,6 @@
+ 			}
+ 			return -1;
+ 		}
+-		if (unlikely(dev->mtu && skb->len > READ_ONCE(dev->mtu))) {
+-			if (entry_hnat_is_bound(entry)) {
+-				entry->bfib1.state = INVALID;
+-				hnat_cache_ebl(1);
+-			}
+-			if (skb_owned) {
+-				kfree_skb(skb);
+-				return 0;
+-			}
+-			return 1;
+-		}
+ 		if (qos_toggle && skb->mark >= 1 && skb->mark <= 63)
+ 			skb->mark = 0;
+ 		skb->protocol = proto;
+@@ -2136,17 +2150,6 @@
+ 		return -1;
+ 	}
+ 
+-	if (unlikely(dev->mtu && skb->len > READ_ONCE(dev->mtu))) {
+-		if (entry_hnat_is_bound(entry)) {
+-			entry->bfib1.state = INVALID;
+-			hnat_cache_ebl(1);
+-		}
+-		if (skb_owned) {
+-			kfree_skb(skb);
+-			return 0;
+-		}
+-		return 1;
+-	}
+ 	if (qos_toggle && skb->mark >= 1 && skb->mark <= 63)
+ 		skb->mark = 0;
+ 
+@@ -2544,12 +2547,8 @@
+ 	 * For standalone wan interface
+ 	 */
+ 	if (do_ge2ext_fast(state->in, skb)) {
+-		int rc = do_hnat_ge_to_ext(skb, __func__);
+-
+-		if (!rc)
++		if (!do_hnat_ge_to_ext(skb, __func__))
+ 			return NF_STOLEN;
+-		if (rc > 0)
+-			return NF_ACCEPT;
+ 		goto drop;
+ 	}
+ 
+@@ -2636,12 +2635,8 @@
+ 	 * For standalone wan interface
+ 	 */
+ 	if (do_ge2ext_fast(state->in, skb)) {
+-		int rc = do_hnat_ge_to_ext(skb, __func__);
+-
+-		if (!rc)
++		if (!do_hnat_ge_to_ext(skb, __func__))
+ 			return NF_STOLEN;
+-		if (rc > 0)
+-			return NF_ACCEPT;
+ 		goto drop;
+ 	}
+ 	if (sqm_toggle && qos_dpi_toggle && !FROM_EXT(skb) &&
+@@ -2739,12 +2734,8 @@
+ 
+ 		/* packets form ge -> external device */
+ 		if (do_ge2ext_fast(state->in, skb)) {
+-			int rc = do_hnat_ge_to_ext(skb, __func__);
+-
+-			if (!rc)
++			if (!do_hnat_ge_to_ext(skb, __func__))
+ 				return NF_STOLEN;
+-			if (rc > 0)
+-				return NF_ACCEPT;
+ 			goto drop;
+ 		}
+ 	}
+@@ -5567,13 +5558,9 @@
+ 
+ 	/* packets form ge -> external device */
+ 	if (do_ge2ext_fast(state->in, skb)) {
+-		int rc = do_hnat_ge_to_ext(skb, __func__);
+-
+-		if (!rc)
++		if (!do_hnat_ge_to_ext(skb, __func__))
+ 			return NF_STOLEN;
+-		if (rc > 0)
+-			return NF_ACCEPT;
+ 		goto drop;
+ 	}
+ 
+ 	return NF_ACCEPT;
