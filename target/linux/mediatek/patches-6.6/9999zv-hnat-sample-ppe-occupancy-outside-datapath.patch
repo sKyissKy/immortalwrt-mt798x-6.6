@@ -1,0 +1,242 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] net: mediatek: sample HNAT PPE occupancy outside packet hooks
+
+The HNAT and software flowtable paths query the occupancy watermark
+from packet context. Every query currently scans all Vendor FOE tables
+under entry_lock, including on systems using Vendor HNAT alone.
+
+Sample in workqueue context with a bounded number of entries per lock
+acquisition. Publish the bound and total counts as one atomic value.
+Drain the worker before a warm reset or teardown, and leave the existing
+watermark and flow owner in place. A fresh table or stopped sampler has
+no sample until the worker publishes one.
+
+Signed-off-by: Codex <codex@openai.com>
+
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.c
+@@ -27,6 +27,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/reset.h>
+ #include <linux/rtnetlink.h>
++#include <linux/sched.h>
+ #include <linux/timer.h>
+ #include <linux/wait.h>
+ #include <net/netfilter/nf_flow_table.h>
+@@ -756,6 +757,83 @@
+ 
+ static int hnat_release_ppe_tables_locked(
+ 	struct mtk_hnat *h, struct mtk_eth_hnat_tx *tx, u32 id);
++
++#define HNAT_PPE_SAMPLE_CHUNK 256
++#define HNAT_PPE_SAMPLE_INTERVAL_MS 500
++
++static void hnat_sample_ppe_occupancy(struct work_struct *work)
++{
++	struct mtk_hnat *h = container_of(to_delayed_work(work), struct mtk_hnat,
++					 ppe_occupancy_work);
++	u32 bound = 0, total = 0;
++	u32 ppe, start;
++
++	if (!READ_ONCE(hook_toggle))
++		goto publish;
++
++	for (ppe = 0; ppe < h->ppe_num; ppe++) {
++		for (start = 0; start < h->foe_etry_num; ) {
++			const struct foe_entry *table;
++			u32 end, i;
++
++			spin_lock_bh(&h->entry_lock);
++			if (!h->ppe_occupancy_running) {
++				spin_unlock_bh(&h->entry_lock);
++				return;
++			}
++
++			table = h->foe_table_cpu[ppe];
++			if (!table || !h->ppe_base[ppe]) {
++				spin_unlock_bh(&h->entry_lock);
++				break;
++			}
++
++			end = min(start + HNAT_PPE_SAMPLE_CHUNK, h->foe_etry_num);
++			for (i = start; i < end; i++)
++				if (entry_hnat_is_bound(&table[i]))
++					bound++;
++			spin_unlock_bh(&h->entry_lock);
++
++			total += end - start;
++			start = end;
++			cond_resched();
++		}
++	}
++
++publish:
++	spin_lock_bh(&h->entry_lock);
++	if (h->ppe_occupancy_running) {
++		u64 snapshot = READ_ONCE(hook_toggle) ?
++			       ((u64)bound << 32) | total : 0;
++
++		atomic64_set(&h->ppe_occupancy, snapshot);
++		queue_delayed_work(system_unbound_wq, &h->ppe_occupancy_work,
++				   msecs_to_jiffies(HNAT_PPE_SAMPLE_INTERVAL_MS));
++	}
++	spin_unlock_bh(&h->entry_lock);
++}
++
++static void hnat_start_ppe_occupancy(struct mtk_hnat *h)
++{
++	spin_lock_bh(&h->entry_lock);
++	if (h->ppe_occupancy_registered && !h->ppe_occupancy_running) {
++		h->ppe_occupancy_running = true;
++		queue_delayed_work(system_unbound_wq, &h->ppe_occupancy_work, 0);
++	}
++	spin_unlock_bh(&h->entry_lock);
++}
++
++static void hnat_stop_ppe_occupancy(struct mtk_hnat *h, bool shutdown)
++{
++	spin_lock_bh(&h->entry_lock);
++	if (shutdown)
++		h->ppe_occupancy_registered = false;
++	h->ppe_occupancy_running = false;
++	atomic64_set(&h->ppe_occupancy, 0);
++	spin_unlock_bh(&h->entry_lock);
++
++	cancel_delayed_work_sync(&h->ppe_occupancy_work);
++}
+ 
+ static int hnat_start(void)
+ {
+@@ -1266,6 +1344,8 @@
+ 		}
+ 	}
+ 
++	/* Drain the sampler before clearing the live tables in place. */
++	hnat_stop_ppe_occupancy(hnat_priv, false);
+ 	for (ppe_id = 0; ppe_id < CFG_PPE_NUM; ppe_id++) {
+ 		foe_table_sz =
+ 			hnat_priv->foe_etry_num * sizeof(struct foe_entry);
+@@ -1329,6 +1409,7 @@
+ 	set_gmac_ppe_fwd(NR_GMAC3_PORT, 1);
+ 	register_netevent_notifier(&nf_hnat_netevent_nb);
+ 
++	hnat_start_ppe_occupancy(hnat_priv);
+ 	mtk_eth_hnat_end(&tx);
+ 	return 0;
+ }
+@@ -1411,6 +1492,8 @@
+ 	spin_lock_init(&hnat_priv->cah_lock);
+ 	spin_lock_init(&hnat_priv->entry_lock);
+ 	spin_lock_init(&hnat_priv->ext_if_lock);
++	INIT_DELAYED_WORK(&hnat_priv->ppe_occupancy_work, hnat_sample_ppe_occupancy);
++	atomic64_set(&hnat_priv->ppe_occupancy, 0);
+ 
+ 	hnat_priv->foe_etry_num = DEF_ETRY_NUM;
+ 	hnat_priv->bind_threshold = DEF_BIND_THRESHOLD;
+@@ -1603,9 +1686,18 @@
+ 	INIT_LIST_HEAD(&hnat_priv->xlat.map_list);
+ 
+ 	err = mtk_flow_multitier_register_ops(&mtk_hnat_multitier_ops);
+-	if (err)
++	if (err) {
+ 		dev_warn(&pdev->dev,
+ 			 "failed to register multitier flow ops (%d)\n", err);
++	} else {
++		/* Warm reset also owns RTNL while it pauses the sampler. */
++		rtnl_lock();
++		spin_lock_bh(&hnat_priv->entry_lock);
++		hnat_priv->ppe_occupancy_registered = true;
++		spin_unlock_bh(&hnat_priv->entry_lock);
++		hnat_start_ppe_occupancy(hnat_priv);
++		rtnl_unlock();
++	}
+ 
+ 	return 0;
+ 
+@@ -1641,6 +1733,7 @@
+ 	struct mtk_eth_hnat_tx tx = { 0 };
+ 	int i;
+ 
++	hnat_stop_ppe_occupancy(hnat_priv, true);
+ 	mtk_flow_multitier_unregister_ops(&mtk_hnat_multitier_ops);
+ 	hnat_deinit_debugfs(hnat_priv);
+ 	hnat_roaming_disable();
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+@@ -11,6 +11,7 @@
+  *   Copyright (C) 2016-2017 John Crispin <blogic@openwrt.org>
+  */
+ 
++#include <linux/atomic.h>
+ #include <linux/debugfs.h>
+ #include <linux/string.h>
+ #include <linux/if.h>
+@@ -21,6 +22,7 @@
+ #include <net/netevent.h>
+ #include <linux/mod_devicetable.h>
+ #include <linux/wait.h>
++#include <linux/workqueue.h>
+ #include "hnat_mcast.h"
+ #include "nf_hnat_mtk.h"
+ #include <net/dsa.h>
+@@ -1033,6 +1035,10 @@
+ 	spinlock_t		cah_lock;
+ 	struct xlat_conf xlat;
+ 	spinlock_t		entry_lock;
++	struct delayed_work ppe_occupancy_work;
++	atomic64_t ppe_occupancy; /* bound entries in high 32 bits, total in low 32 */
++	bool ppe_occupancy_registered; /* protected by entry_lock */
++	bool ppe_occupancy_running; /* protected by entry_lock */
+ 	bool ipv6_en;
+ 	bool guest_en;
+ 	bool dscp_en;
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -5812,40 +5812,13 @@
+ 
+ static void hnat_multitier_get_ppe_occupancy(u32 *bound, u32 *total)
+ {
+-	u32 b = 0, t = 0;
+-	u32 i, idx;
+-
+-	if (!bound || !total)
+-		return;
+-
+-	*bound = 0;
+-	*total = 0;
+-
+-	if (!hnat_priv || !READ_ONCE(hnat_priv->fe_base))
+-		return;
+-
+-	spin_lock_bh(&hnat_priv->entry_lock);
+-	if (!hnat_priv->fe_base) {
+-		spin_unlock_bh(&hnat_priv->entry_lock);
+-		return;
+-	}
+-
+-	for (i = 0; i < CFG_PPE_NUM && i < MAX_PPE_NUM; i++) {
+-		const struct foe_entry *table = hnat_priv->foe_table_cpu[i];
+-
+-		if (!table || !hnat_priv->ppe_base[i])
+-			continue;
+-
+-		t += hnat_priv->foe_etry_num;
+-		for (idx = 0; idx < hnat_priv->foe_etry_num; idx++) {
+-			if (table[idx].bfib1.state == BIND)
+-				b++;
+-		}
+-	}
+-	spin_unlock_bh(&hnat_priv->entry_lock);
+-
+-	*bound = b;
+-	*total = t;
++	struct mtk_hnat *h = READ_ONCE(hnat_priv);
++	u64 snapshot = h ? atomic64_read(&h->ppe_occupancy) : 0;
++
++	if (bound)
++		*bound = upper_32_bits(snapshot);
++	if (total)
++		*total = lower_32_bits(snapshot);
+ }
+ 
+ static bool hnat_multitier_roam_flush(const u8 *mac,
