@@ -1,0 +1,173 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] net: ethernet: mtk_hnat: gate packet-path diagnostics
+
+Replace the always-enabled trace_printk() call sites in hnat_nf_hook.c with
+pr_debug(). This includes the pre/post-routing summaries, packet reinjection
+messages and hook error diagnostics.
+
+The H5000M kernel config has CONFIG_TRACING=y but CONFIG_DYNAMIC_DEBUG is
+disabled. The HNAT Makefile adds only -Werror, and neither the source nor
+target Makefile defines DEBUG. With the current config, pr_debug() expands
+to no_printk(): arguments remain format-checked and there is no trace-buffer
+write or per-call runtime diagnostic work. A DEBUG-enabled rebuild can retain
+these diagnostics without a new project toggle.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+ drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c | 34 ++++++++++++++++++----------------
+ 1 file changed, 17 insertions(+), 17 deletions(-)
+diff --git a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -1853,7 +1853,7 @@
+ 	int ext_idx;
+ 
+ 	if (!ppdev || !(ppdev->flags & IFF_UP)) {
+-		trace_printk("%s: called from %s fail\n", __func__, func);
++		pr_debug("%s: called from %s fail\n", __func__, func);
+ 		return -1;
+ 	}
+ 
+@@ -1918,7 +1918,7 @@
+ 	struct net_device *dev;
+ 	struct foe_entry *entry;
+ 
+-	trace_printk("%s: vlan_prot=0x%x, vlan_tci=%x\n", __func__,
++	pr_debug("%s: vlan_prot=0x%x, vlan_tci=%x\n", __func__,
+ 		     ntohs(skb->vlan_proto), skb->vlan_tci);
+ 
+ 	if (skb_hnat_entry(skb) >= hnat_priv->foe_etry_num ||
+@@ -1987,7 +1987,7 @@
+ 				return 0;
+ 			}
+ 		}
+-		trace_printk("%s: called from %s fail\n", __func__, func);
++		pr_debug("%s: called from %s fail\n", __func__, func);
+ 		return -1;
+ 	}
+ }
+@@ -2025,7 +2025,7 @@
+ 				dev_queue_xmit(skb);
+ 				return 0;
+ 			}
+-			trace_printk("%s: called from %s fail[MapE]\n", __func__,
++			pr_debug("%s: called from %s fail[MapE]\n", __func__,
+ 				     func);
+ 			return -1;
+ 		}
+@@ -2043,7 +2043,7 @@
+ 			/* clear HWNAT cache */
+ 			hnat_cache_ebl(1);
+ 		}
+-		trace_printk("%s: called from %s fail, index=%x\n", __func__,
++		pr_debug("%s: called from %s fail, index=%x\n", __func__,
+ 			     func, index);
+ 		return -1;
+ 	}
+@@ -2123,7 +2123,7 @@
+ 		skb->protocol = proto;
+ 		skb->dev = dev;
+ 		dev_queue_xmit(skb);
+-		trace_printk("%s: called from %s successfully\n",
++		pr_debug("%s: called from %s successfully\n",
+ 			     __func__, func);
+ 		return 0;
+ 	}
+@@ -2154,14 +2154,14 @@
+ 	skb_set_network_header(skb, 0);
+ 	skb_push(skb, ETH_HLEN);
+ 	dev_queue_xmit(skb);
+-	trace_printk("%s: called from %s successfully\n", __func__, func);
++	pr_debug("%s: called from %s successfully\n", __func__, func);
+ 	return 0;
+ }
+ 
+ static void pre_routing_print(struct sk_buff *skb, const struct net_device *in,
+ 			      const struct net_device *out, const char *func)
+ {
+-	trace_printk(
++	pr_debug(
+ 		"[%s]: %s(iif=0x%x CB2=0x%x)-->%s (ppe_hash=0x%x) sport=0x%x reason=0x%x alg=0x%x from %s\n",
+ 		__func__, in->name, skb_hnat_iface(skb),
+ 		HNAT_SKB_CB2(skb)->magic, out->name, skb_hnat_entry(skb),
+@@ -2172,7 +2172,7 @@
+ static void post_routing_print(struct sk_buff *skb, const struct net_device *in,
+ 			       const struct net_device *out, const char *func)
+ {
+-	trace_printk(
++	pr_debug(
+ 		"[%s]: %s(iif=0x%x, CB2=0x%x)-->%s (ppe_hash=0x%x) sport=0x%x reason=0x%x alg=0x%x from %s\n",
+ 		__func__, in->name, skb_hnat_iface(skb),
+ 		HNAT_SKB_CB2(skb)->magic, out->name, skb_hnat_entry(skb),
+@@ -3738,7 +3738,7 @@
+ 		default:
+ 			return -1;
+ 		}
+-		trace_printk(
++		pr_debug(
+ 			"[%s]skb->head=%p, skb->data=%p,ip_hdr=%p, skb->len=%d, skb->data_len=%d\n",
+ 			__func__, skb->head, skb->data, iph, skb->len,
+ 			skb->data_len);
+@@ -4002,7 +4002,7 @@
+ 			return -1;
+ 		}
+ 
+-		trace_printk(
++		pr_debug(
+ 			"[%s]skb->head=%p, skb->data=%p,ipv6_hdr=%p, skb->len=%d, skb->data_len=%d\n",
+ 			__func__, skb->head, skb->data, ip6h, skb->len,
+ 			skb->data_len);
+@@ -4108,7 +4108,7 @@
+ 				entry.ipv4_hnapt.vlan1 = 2;
+ 		}
+ 
+-		trace_printk("learn of lan or wan(iif=%x) --> %s(ext)\n",
++		pr_debug("learn of lan or wan(iif=%x) --> %s(ext)\n",
+ 			     skb_hnat_iface(skb), dev->name);
+ 		/* To CPU then stolen by pre-routing hant hook of LAN/WAN
+ 		 * Current setting is PDMA RX.
+@@ -4373,7 +4373,7 @@
+ 	    !is_magic_tag_valid(skb) || !IS_SPACE_AVAILABLE_HEAD(skb))
+ 		return NF_ACCEPT;
+ 
+-	trace_printk(
++	pr_debug(
+ 		"[%s]entry=%x reason=%x gmac_no=%x wdmaid=%x rxid=%x wcid=%x bssid=%x\n",
+ 		__func__, skb_hnat_entry(skb), skb_hnat_reason(skb), gmac_no,
+ 		skb_hnat_wdma_id(skb), skb_hnat_bss_id(skb),
+@@ -5298,7 +5298,7 @@
+ 	}
+ #endif
+ 
+-	trace_printk("[%s] case hit, %x-->%s, reason=%x\n", __func__,
++	pr_debug("[%s] case hit, %x-->%s, reason=%x\n", __func__,
+ 		     skb_hnat_iface(skb), out->name, skb_hnat_reason(skb));
+ 
+ 	if (skb_hnat_entry(skb) >= hnat_priv->foe_etry_num ||
+@@ -5498,7 +5498,7 @@
+ 
+ drop:
+ 	if (skb)
+-		trace_printk(
++		pr_debug(
+ 			"%s:drop (iif=0x%x, out_dev=%s, CB2=0x%x, ppe_hash=0x%x,\n"
+ 			"sport=0x%x, reason=0x%x, alg=0x%x)\n",
+ 			__func__, skb_hnat_iface(skb), state->out->name,
+@@ -5524,7 +5524,7 @@
+ 
+ drop:
+ 	if (skb)
+-		trace_printk(
++		pr_debug(
+ 			"%s:drop (iif=0x%x, out_dev=%s, CB2=0x%x, ppe_hash=0x%x,\n"
+ 			"sport=0x%x, reason=0x%x, alg=0x%x)\n",
+ 			__func__, skb_hnat_iface(skb), state->out->name,
+@@ -5614,7 +5614,7 @@
+ 
+ drop:
+ 	if (skb)
+-		trace_printk(
++		pr_debug(
+ 			"%s:drop (iif=0x%x, out_dev=%s, CB2=0x%x, ppe_hash=0x%x,\n"
+ 			"sport=0x%x, reason=0x%x, alg=0x%x)\n",
+ 			__func__, skb_hnat_iface(skb), state->out->name,
