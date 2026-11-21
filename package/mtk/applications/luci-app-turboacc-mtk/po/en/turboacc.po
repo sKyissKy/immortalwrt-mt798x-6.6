@@ -185,3 +185,57 @@ msgstr "Enable software flowtable fallback"
 
 msgid "Keep flows in software fastpath via firewall4 flowtable when PPE occupancy reaches the 80% watermark or hardware offload defers."
 msgstr "Keep flows in software fastpath via firewall4 flowtable when PPE occupancy reaches the 80% watermark or hardware offload defers."
+
+msgid "Status unavailable"
+msgstr "Status unavailable"
+
+msgid "TurboACC service apply is in progress"
+msgstr "TurboACC service apply is in progress"
+
+msgid "TurboACC service apply succeeded"
+msgstr "TurboACC service apply succeeded"
+
+msgid "TurboACC service is stopped"
+msgstr "TurboACC service is stopped"
+
+msgid "TurboACC service apply failed: %s"
+msgstr "TurboACC service apply failed: %s"
+
+msgid "See the system log"
+msgstr "See the system log"
+
+msgid "No service result is available"
+msgstr "No service result is available"
+
+msgid "Telemetry unavailable"
+msgstr "Telemetry unavailable"
+
+msgid "PPE occupancy unavailable"
+msgstr "PPE occupancy unavailable"
+
+msgid "Detailed PPE statistics are not loaded."
+msgstr "Detailed PPE statistics are not loaded."
+
+msgid "Reading detailed PPE statistics..."
+msgstr "Reading detailed PPE statistics..."
+
+msgid "Detailed PPE statistics are unavailable."
+msgstr "Detailed PPE statistics are unavailable."
+
+msgid "Detailed PPE statistics updated."
+msgstr "Detailed PPE statistics updated."
+
+msgid "No per-PPE counters were returned."
+msgstr "No per-PPE counters were returned."
+
+msgid "Refresh per-PPE details"
+msgstr "Refresh per-PPE details"
+
+msgid "Per-PPE diagnostics scan the full table on request and count the selected debug entry state; cached Tier-1 occupancy is the BIND count."
+msgstr "Per-PPE diagnostics scan the full table on request and count the selected debug entry state; cached Tier-1 occupancy is the BIND count."
+
+msgid "Last TurboACC service run"
+msgstr "Last TurboACC service run"
+
+msgid "Diagnostic state entries"
+msgstr "Diagnostic state entries"

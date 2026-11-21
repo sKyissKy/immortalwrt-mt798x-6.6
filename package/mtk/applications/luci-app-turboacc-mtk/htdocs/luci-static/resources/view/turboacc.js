@@ -17,51 +17,51 @@ var getSystemFeatures = rpc.declare({
 var getFastPathStat = rpc.declare({
 	object: 'luci.turboacc',
 	method: 'getFastPathStat',
-	expect: { '': {} }
+	expect: { '': {} },
+	reject: true
 });
 
 var getFullConeStat = rpc.declare({
 	object: 'luci.turboacc',
 	method: 'getFullConeStat',
-	expect: { '': {} }
+	expect: { '': {} },
+	reject: true
 });
 
 var getTCPCCAStat = rpc.declare({
 	object: 'luci.turboacc',
 	method: 'getTCPCCAStat',
-	expect: { '': {} }
+	expect: { '': {} },
+	reject: true
 });
 
 var getMTKPPEStat = rpc.declare({
 	object: 'luci.turboacc',
 	method: 'getMTKPPEStat',
-	expect: { '': {} }
+	expect: { '': {} },
+	reject: true
 });
 
-var getMultiTierTelemetry = rpc.declare({
+var getMultiTierTelemetryStatus = rpc.declare({
 	object: 'luci.turboacc',
-	method: 'getMultiTierTelemetry',
-	expect: { '': {} }
+	method: 'getMultiTierTelemetryStatus',
+	expect: { '': {} },
+	reject: true
 });
 
-function getServiceStatus() {
-	return Promise.all([
-		L.resolveDefault(getFastPathStat(), {}),
-		L.resolveDefault(getFullConeStat(), {}),
-		L.resolveDefault(getTCPCCAStat(), {})
-	]);
-}
+var getRuntimeStatus = rpc.declare({
+	object: 'luci.turboacc',
+	method: 'getRuntimeStatus',
+	expect: { '': {} },
+	reject: true
+});
 
-function getMTKPPEStatus() {
-	return Promise.all([
-		L.resolveDefault(getMTKPPEStat(), {})
-	]);
-}
-
-function getMultiTierStatus() {
-	return Promise.all([
-		L.resolveDefault(getMultiTierTelemetry(), {})
-	]);
+function queryStatus(fn) {
+	return Promise.resolve().then(fn).then(function(data) {
+		return { ok: true, data: data || {} };
+	}, function() {
+		return { ok: false };
+	});
 }
 
 function trimValue(value) {
@@ -124,24 +124,51 @@ function progressbar(value, max, byte) {
 	}, E('div', { 'style': 'width:%.2f%%'.format(pc) }));
 }
 
-function renderStatus(stats) {
-	var spanTemp = '<em><span style="color:%s"><strong>%s</strong></span></em>';
-	var renderHTML = [];
-	for (var stat of (stats || []))
-		if (stat && stat.type) {
-			if (stat.type.includes(' / ')) {
-				var types = stat.type.split(' / ');
-				var inner = spanTemp.format('green', getRuntimeLabel(types[0]));
-				for (var i of types.slice(1))
-					inner += spanTemp.format('none', ' / ') + spanTemp.format('red', getRuntimeLabel(i));
-				renderHTML.push(inner);
-			} else {
-				var color = (stat.type === 'HNAT Disabled' || stat.type === 'Ethernet HNAT Disabled') ? 'red' : 'green';
-				renderHTML.push(spanTemp.format(color, getRuntimeLabel(stat.type)));
-			}
-		} else
-			renderHTML.push(spanTemp.format('red', _('Disabled')));
-	return renderHTML;
+function statusLabel(color, label) {
+	var style = color === 'none' ? 'color:inherit' : 'color:%s'.format(color);
+	return E('em', {}, E('span', { 'style': style }, E('strong', {}, label)));
+}
+
+function renderStatus(result) {
+	if (!result || !result.ok)
+		return statusLabel('red', _('Status unavailable'));
+
+	var stat = result.data || {};
+	if (!stat.type)
+		return statusLabel('red', _('Disabled'));
+
+	if (stat.type.includes(' / ')) {
+		var types = stat.type.split(' / ');
+		var nodes = [ statusLabel('green', getRuntimeLabel(types[0])) ];
+		for (var i of types.slice(1))
+			nodes.push(' / ', statusLabel('red', getRuntimeLabel(i)));
+		return E('span', {}, nodes);
+	}
+
+	var color = (stat.type === 'HNAT Disabled' || stat.type === 'Ethernet HNAT Disabled') ? 'red' : 'green';
+	return statusLabel(color, getRuntimeLabel(stat.type));
+}
+
+function renderServiceResult(result) {
+	if (!result || !result.ok)
+		return statusLabel('red', _('Status unavailable'));
+
+	var status = result.data || {};
+	if (!status.available)
+		return statusLabel('none', _('No service result is available'));
+
+	switch (status.state) {
+	case 'starting':
+		return statusLabel('orange', _('TurboACC service apply is in progress'));
+	case 'ok':
+		return statusLabel('green', _('TurboACC service apply succeeded'));
+	case 'stopped':
+		return statusLabel('none', _('TurboACC service is stopped'));
+	case 'error':
+		return statusLabel('red', _('TurboACC service apply failed: %s').format(status.message || _('See the system log')));
+	default:
+		return statusLabel('none', _('No service result is available'));
+	}
 }
 
 function syncPPERows(tableEl, ppeStats) {
@@ -163,7 +190,7 @@ function syncPPERows(tableEl, ppeStats) {
 			dom.content(cell, bar);
 		} else {
 			tableEl.appendChild(E('tr', { 'data-ppe-row': '1' }, [
-				E('td', { 'width': '33%' }, 'PPE' + i + ' ' + _('Bind Entrys')),
+				E('td', { 'width': '33%' }, 'PPE' + i + ' ' + _('Diagnostic state entries')),
 				E('td', { 'id': cellId }, [ bar ])
 			]));
 		}
@@ -175,11 +202,14 @@ function toInt(value) {
 	return isNaN(n) ? 0 : n;
 }
 
-function syncMultiTierRows(tableEl, mtStats) {
+function syncMultiTierRows(tableEl, result) {
 	if (!tableEl)
 		return;
 
-	var mt = mtStats || {};
+	var mt = result && result.ok ? (result.data || {}) : {};
+	var telemetryAvailable = !!(result && result.ok && mt.available);
+	var unavailableText = result == null ? _('Collecting data...') :
+		(result.ok ? _('Telemetry unavailable') : _('Status unavailable'));
 	var bind = toInt(mt.tier1_ppe_bind);
 	var total = toInt(mt.tier1_ppe_total);
 	var permille = toInt(mt.tier1_occupancy_permille);
@@ -195,22 +225,24 @@ function syncMultiTierRows(tableEl, mtStats) {
 		{
 			id: 'mt_tier1_occ',
 			label: _('Tier-1 PPE Occupancy'),
-			text: '%d / %d (%d.%d%%)'.format(bind, total, Math.floor(permille / 10), permille % 10)
+			text: telemetryAvailable && mt.ppe_occupancy_available
+				? '%d / %d (%d.%d%%)'.format(bind, total, Math.floor(permille / 10), permille % 10)
+				: (telemetryAvailable ? _('PPE occupancy unavailable') : unavailableText)
 		},
 		{
 			id: 'mt_tier2_stat',
 			label: _('Tier-2 SW Fallback'),
-			text: '%d %s / %d %s / %s'.format(swFlows, _('flows'), swPkts, _('packets'), String.format('%1024.2mB', swBytes))
+			text: telemetryAvailable ? '%d %s / %d %s / %s'.format(swFlows, _('flows'), swPkts, _('packets'), String.format('%1024.2mB', swBytes)) : unavailableText
 		},
 		{
 			id: 'mt_events_stat',
 			label: _('Multi-Tier Events'),
-			text: '%s: %d / %s: %d / %s: %d / %s: %d'.format(
+			text: telemetryAvailable ? '%s: %d / %s: %d / %s: %d / %s: %d'.format(
 				_('Defers'), defers,
 				_('Backoffs'), backoffs,
 				_('Roam Flushes'), roams,
 				_('SER Epoch'), serEpoch
-			)
+			) : unavailableText
 		}
 	];
 
@@ -228,21 +260,44 @@ function syncMultiTierRows(tableEl, mtStats) {
 	}
 }
 
+function updateTurboaccStatus() {
+	var tableEl = document.getElementById('turboacc_status');
+	if (!tableEl)
+		return;
+
+	return Promise.all([
+		queryStatus(getFastPathStat),
+		queryStatus(getFullConeStat),
+		queryStatus(getTCPCCAStat),
+		queryStatus(getMultiTierTelemetryStatus),
+		queryStatus(getRuntimeStatus)
+	]).then(function(res) {
+		var ids = [ 'fastpath_state', 'fullcone_state', 'tcpcca_state' ];
+		for (var i = 0; i < ids.length; i++) {
+			var node = document.getElementById(ids[i]);
+			if (node)
+				dom.content(node, renderStatus(res[i]));
+		}
+
+		var serviceNode = document.getElementById('service_apply_state');
+		if (serviceNode)
+			dom.content(serviceNode, renderServiceResult(res[4]));
+
+		syncMultiTierRows(tableEl, res[3]);
+	});
+}
+
 return view.extend({
 	load: function() {
 		return Promise.all([
 			uci.load('turboacc'),
-			L.resolveDefault(getSystemFeatures(), {}),
-			L.resolveDefault(getMTKPPEStat(), {}),
-			L.resolveDefault(getMultiTierTelemetry(), {})
+			L.resolveDefault(getSystemFeatures(), {})
 		]);
 	},
 
 	render: function(data) {
 		var m, s, o;
 		var features = data[1] || {};
-		var ppe_stats = data[2] || {};
-		var mt_stats = data[3] || {};
 		var savedFastpath = normalizeFastpathValue(uci.get('turboacc', 'config', 'fastpath'));
 		var savedFullcone = trimValue(uci.get('turboacc', 'config', 'fullcone'));
 		var savedTcpcca = trimValue(uci.get('turboacc', 'config', 'tcpcca')) || 'cubic';
@@ -254,7 +309,7 @@ return view.extend({
 		s = m.section(form.TypedSection);
 		s.anonymous = true;
 		s.render = function () {
-			var acc_status = E('table', { 'class': 'table', 'width': '100%', 'cellspacing': '10' }, [
+			var acc_status = E('table', { 'id': 'turboacc_status', 'class': 'table', 'width': '100%', 'cellspacing': '10' }, [
 				E('tr', {}, [
 					E('td', { 'width': '33%' }, _('FastPath Engine')),
 					E('td', { 'id': 'fastpath_state' }, E('em', {}, _('Collecting data...')))
@@ -266,35 +321,47 @@ return view.extend({
 				E('tr', {}, [
 					E('td', { 'width': '33%' }, _('TCP CCA')),
 					E('td', { 'id': 'tcpcca_state' }, E('em', {}, _('Collecting data...')))
+				]),
+				E('tr', {}, [
+					E('td', { 'width': '33%' }, _('Last TurboACC service run')),
+					E('td', { 'id': 'service_apply_state' }, E('em', {}, _('Collecting data...')))
 				])
 			]);
 
-			syncPPERows(acc_status, ppe_stats);
-			syncMultiTierRows(acc_status, mt_stats);
+			syncMultiTierRows(acc_status, null);
+			poll.add(updateTurboaccStatus, 3);
 
-			poll.add(function () {
-				return Promise.all([
-					L.resolveDefault(getServiceStatus(), []),
-					L.resolveDefault(getMTKPPEStatus(), [{}]),
-					L.resolveDefault(getMultiTierStatus(), [{}])
-				]).then(function (res) {
-					var stats = renderStatus(res[0]);
-					var tds = [ 'fastpath_state', 'fullcone_state', 'tcpcca_state' ];
-					for (var i = 0; i < tds.length; i++) {
-						var node = document.getElementById(tds[i]);
-						if (node && stats[i] != null)
-							node.innerHTML = stats[i];
-					}
-					var nextPpe = (res[1] && res[1][0]) ? res[1][0] : {};
-					syncPPERows(acc_status, nextPpe);
-					var nextMt = (res[2] && res[2][0]) ? res[2][0] : {};
-					syncMultiTierRows(acc_status, nextMt);
-				});
-			}, 3);
+			var ppe_detail_state = E('span', { 'id': 'ppe_detail_state' }, _('Detailed PPE statistics are not loaded.'));
+			var ppe_detail_button;
+			ppe_detail_button = E('button', {
+				'class': 'btn cbi-button',
+				'click': function(ev) {
+					ev.preventDefault();
+					ppe_detail_button.disabled = true;
+					dom.content(ppe_detail_state, _('Reading detailed PPE statistics...'));
+
+					return Promise.resolve(getMTKPPEStat()).then(function(stats) {
+						syncPPERows(acc_status, stats || { PPE_NUM: '0' });
+						if (!stats || !stats.available)
+							dom.content(ppe_detail_state, _('Detailed PPE statistics are unavailable.'));
+						else if ((parseInt(stats.PPE_NUM, 10) || 0) > 0)
+							dom.content(ppe_detail_state, _('Detailed PPE statistics updated.'));
+						else
+							dom.content(ppe_detail_state, _('No per-PPE counters were returned.'));
+					}, function() {
+						syncPPERows(acc_status, { PPE_NUM: '0' });
+						dom.content(ppe_detail_state, _('Status unavailable'));
+					}).finally(function() {
+						ppe_detail_button.disabled = false;
+					});
+				}
+			}, _('Refresh per-PPE details'));
 
 			return E('fieldset', { 'class': 'cbi-section' }, [
 				E('legend', {}, _('Acceleration Status')),
-				acc_status
+				acc_status,
+				E('p', { 'class': 'cbi-value-description' }, _('Per-PPE diagnostics scan the full table on request and count the selected debug entry state; cached Tier-1 occupancy is the BIND count.')),
+				ppe_detail_button, ' ', ppe_detail_state
 			]);
 		};
 

@@ -223,7 +223,7 @@ function parse_ppe_entries_summary() {
 	return res;
 }
 
-function read_multitier_telemetry() {
+function read_multitier_telemetry(include_status) {
 	let res = {
 		tier1_ppe_bind: 0,
 		tier1_ppe_total: 0,
@@ -238,9 +238,15 @@ function read_multitier_telemetry() {
 	};
 
 	let raw = fs.readfile(rpath('/proc/net/stat/mtk_flow_multitier'));
-	if (raw == null)
+	if (raw == null) {
+		if (include_status) {
+			res.available = false;
+			res.ppe_occupancy_available = false;
+		}
 		return res;
+	}
 
+	let parsed = 0;
 	for (let line in split(raw, "\n")) {
 		let m = match(trim(line), /^([A-Za-z0-9_]+)[ \t:=]+([0-9]+)$/);
 		if (!m)
@@ -251,11 +257,44 @@ function read_multitier_telemetry() {
 			   (length(num_str) == 19 && num_str > '9223372036854775807'))
 			? 9223372036854775807
 			: int(num_str);
-		if (exists(res, key))
+		if (exists(res, key)) {
 			res[key] = val;
+			parsed++;
+		}
+	}
+	if (include_status) {
+		res.available = parsed > 0;
+		res.ppe_occupancy_available = parsed > 0 && res.tier1_ppe_total > 0;
 	}
 
 	return res;
+}
+
+function read_service_status() {
+	let raw = fs.readfile(rpath('/var/run/turboacc.status'));
+	let status = null;
+	let message = '';
+
+	if (raw == null)
+		return { available: false, state: 'unknown' };
+
+	for (let line in split(raw, /\r?\n/)) {
+		let eq = index(line, '=');
+		if (eq < 0)
+			continue;
+
+		let key = trim(substr(line, 0, eq));
+		let value = trim(substr(line, eq + 1));
+		if (key == 'state')
+			status = value;
+		else if (key == 'message')
+			message = value;
+	}
+
+	if (status != 'starting' && status != 'ok' && status != 'error' && status != 'stopped')
+		return { available: false, state: 'unknown' };
+
+	return { available: true, state: status, message };
 }
 
 const methods = {
@@ -354,10 +393,9 @@ const methods = {
 	getMTKPPEStat: {
 		args: {},
 		call: function() {
-			let ppe_stat = {};
+			let ppe_stat = { available: false, PPE_NUM: '0' };
 
 			if (!hnat_hook_enabled()) {
-				ppe_stat.PPE_NUM = '0';
 				print(sprintf('%J\n', ppe_stat));
 				return;
 			}
@@ -383,45 +421,49 @@ const methods = {
 			}
 
 			let raw = fs.readfile(rpath(ppe_path));
-			if (raw != null) {
-				for (let line in split(raw, /\r?\n/)) {
-					if (line == '')
-						continue;
-					let eq = index(line, '=');
-					let second_eq = (eq >= 0) ? index(substr(line, eq + 1), '=') : -1;
-					if (eq >= 0 && second_eq < 0) {
-						let key = trim(substr(line, 0, eq));
-						let value = trim(substr(line, eq + 1));
-						let fwd = match(key, /^[Pp][Pp][Ee]\s*(\d+)\s*[_\-\s.]*(.+)$/);
-						let rev = match(key, /^(.+?)\s*[_\-\s.]*[Pp][Pp][Ee]\s*(\d+)$/);
+			if (raw == null) {
+				print(sprintf('%J\n', ppe_stat));
+				return;
+			}
 
-						if (fwd) {
-							let ppe = fwd[1];
-							let kind = lc(fwd[2]);
-							if (match(kind, /bind/) || match(kind, /bound/))
-								set_ppe_value(ppe_stat, 'BIND', ppe, value);
-							else if (match(kind, /all/) || match(kind, /entry/) || match(kind, /entries/) || match(kind, /total/))
-								set_ppe_value(ppe_stat, 'ALL', ppe, value);
-							else
-								ppe_stat[key] = value;
-						}
-						else if (rev) {
-							let reverse_kind = lc(rev[1]);
-							let reverse_ppe = rev[2];
-							if (match(reverse_kind, /bind/) || match(reverse_kind, /bound/))
-								set_ppe_value(ppe_stat, 'BIND', reverse_ppe, value);
-							else if (match(reverse_kind, /all/) || match(reverse_kind, /entry/) || match(reverse_kind, /entries/) || match(reverse_kind, /total/))
-								set_ppe_value(ppe_stat, 'ALL', reverse_ppe, value);
-							else
-								ppe_stat[key] = value;
-						}
-						else {
+			ppe_stat.available = true;
+			for (let line in split(raw, /\r?\n/)) {
+				if (line == '')
+					continue;
+				let eq = index(line, '=');
+				let second_eq = (eq >= 0) ? index(substr(line, eq + 1), '=') : -1;
+				if (eq >= 0 && second_eq < 0) {
+					let key = trim(substr(line, 0, eq));
+					let value = trim(substr(line, eq + 1));
+					let fwd = match(key, /^[Pp][Pp][Ee]\s*(\d+)\s*[_\-\s.]*(.+)$/);
+					let rev = match(key, /^(.+?)\s*[_\-\s.]*[Pp][Pp][Ee]\s*(\d+)$/);
+
+					if (fwd) {
+						let ppe = fwd[1];
+						let kind = lc(fwd[2]);
+						if (match(kind, /bind/) || match(kind, /bound/))
+							set_ppe_value(ppe_stat, 'BIND', ppe, value);
+						else if (match(kind, /all/) || match(kind, /entry/) || match(kind, /entries/) || match(kind, /total/))
+							set_ppe_value(ppe_stat, 'ALL', ppe, value);
+						else
 							ppe_stat[key] = value;
-						}
+					}
+					else if (rev) {
+						let reverse_kind = lc(rev[1]);
+						let reverse_ppe = rev[2];
+						if (match(reverse_kind, /bind/) || match(reverse_kind, /bound/))
+							set_ppe_value(ppe_stat, 'BIND', reverse_ppe, value);
+						else if (match(reverse_kind, /all/) || match(reverse_kind, /entry/) || match(reverse_kind, /entries/) || match(reverse_kind, /total/))
+							set_ppe_value(ppe_stat, 'ALL', reverse_ppe, value);
+						else
+							ppe_stat[key] = value;
 					}
 					else {
-						parse_compact_ppe_line(ppe_stat, line);
+						ppe_stat[key] = value;
 					}
+				}
+				else {
+					parse_compact_ppe_line(ppe_stat, line);
 				}
 			}
 
@@ -443,7 +485,19 @@ const methods = {
 	getMultiTierTelemetry: {
 		args: {},
 		call: function() {
-			print(sprintf('%J\n', read_multitier_telemetry()));
+			print(sprintf('%J\n', read_multitier_telemetry(false)));
+		}
+	},
+	getMultiTierTelemetryStatus: {
+		args: {},
+		call: function() {
+			print(sprintf('%J\n', read_multitier_telemetry(true)));
+		}
+	},
+	getRuntimeStatus: {
+		args: {},
+		call: function() {
+			print(sprintf('%J\n', read_service_status()));
 		}
 	}
 };

@@ -183,3 +183,57 @@ msgstr "启用软件流表回退"
 
 msgid "Keep flows in software fastpath via firewall4 flowtable when PPE occupancy reaches the 80% watermark or hardware offload defers."
 msgstr "当 PPE 占用率达到 80% 水位或硬件分载延缓时，通过 firewall4 流表保持连接走软件快速路径。"
+
+msgid "Status unavailable"
+msgstr "状态不可用"
+
+msgid "TurboACC service apply is in progress"
+msgstr "TurboACC 服务应用中"
+
+msgid "TurboACC service apply succeeded"
+msgstr "TurboACC 服务应用成功"
+
+msgid "TurboACC service is stopped"
+msgstr "TurboACC 服务已停止"
+
+msgid "TurboACC service apply failed: %s"
+msgstr "TurboACC 服务应用失败：%s"
+
+msgid "See the system log"
+msgstr "请查看系统日志"
+
+msgid "No service result is available"
+msgstr "没有可用的服务运行结果"
+
+msgid "Telemetry unavailable"
+msgstr "遥测数据不可用"
+
+msgid "PPE occupancy unavailable"
+msgstr "PPE 占用数据不可用"
+
+msgid "Detailed PPE statistics are not loaded."
+msgstr "尚未读取详细 PPE 统计。"
+
+msgid "Reading detailed PPE statistics..."
+msgstr "正在读取详细 PPE 统计..."
+
+msgid "Detailed PPE statistics are unavailable."
+msgstr "详细 PPE 统计不可用。"
+
+msgid "Detailed PPE statistics updated."
+msgstr "详细 PPE 统计已更新。"
+
+msgid "No per-PPE counters were returned."
+msgstr "未返回各 PPE 的计数器。"
+
+msgid "Refresh per-PPE details"
+msgstr "刷新各 PPE 详细信息"
+
+msgid "Per-PPE diagnostics scan the full table on request and count the selected debug entry state; cached Tier-1 occupancy is the BIND count."
+msgstr "各 PPE 诊断会在请求时扫描整个表并统计所选调试项状态；缓存的一级占用数才是 BIND 计数。"
+
+msgid "Last TurboACC service run"
+msgstr "TurboACC 最近一次服务运行结果"
+
+msgid "Diagnostic state entries"
+msgstr "诊断状态项"

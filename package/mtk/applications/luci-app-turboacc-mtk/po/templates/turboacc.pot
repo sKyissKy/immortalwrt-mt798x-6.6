@@ -176,3 +176,57 @@ msgstr ""
 
 msgid "Keep flows in software fastpath via firewall4 flowtable when PPE occupancy reaches the 80% watermark or hardware offload defers."
 msgstr ""
+
+msgid "Status unavailable"
+msgstr ""
+
+msgid "TurboACC service apply is in progress"
+msgstr ""
+
+msgid "TurboACC service apply succeeded"
+msgstr ""
+
+msgid "TurboACC service is stopped"
+msgstr ""
+
+msgid "TurboACC service apply failed: %s"
+msgstr ""
+
+msgid "See the system log"
+msgstr ""
+
+msgid "No service result is available"
+msgstr ""
+
+msgid "Telemetry unavailable"
+msgstr ""
+
+msgid "PPE occupancy unavailable"
+msgstr ""
+
+msgid "Detailed PPE statistics are not loaded."
+msgstr ""
+
+msgid "Reading detailed PPE statistics..."
+msgstr ""
+
+msgid "Detailed PPE statistics are unavailable."
+msgstr ""
+
+msgid "Detailed PPE statistics updated."
+msgstr ""
+
+msgid "No per-PPE counters were returned."
+msgstr ""
+
+msgid "Refresh per-PPE details"
+msgstr ""
+
+msgid "Per-PPE diagnostics scan the full table on request and count the selected debug entry state; cached Tier-1 occupancy is the BIND count."
+msgstr ""
+
+msgid "Last TurboACC service run"
+msgstr ""
+
+msgid "Diagnostic state entries"
+msgstr ""

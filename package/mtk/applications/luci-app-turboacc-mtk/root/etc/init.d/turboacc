@@ -110,30 +110,125 @@ _uci_bool_enabled() {
 	return 1
 }
 
+write_service_status() {
+	local state="$1"
+	local message="${2:-}"
+	local status_file="${TURBOACC_STATUS_FILE:-/var/run/turboacc.status}"
+	local tmp="${status_file}.tmp.$$"
+
+	message="$(printf '%s' "$message" | tr '\r\n' '  ')"
+	( umask 077; printf 'state=%s\nmessage=%s\n' "$state" "$message" >"$tmp" && mv "$tmp" "$status_file" ) || {
+		rm -f "$tmp"
+		logger -t turboacc "WARNING: cannot update service status at $status_file"
+		return 1
+	}
+}
+
+turboacc_error() {
+	TURBOACC_START_ERROR="$1"
+	logger -t turboacc "ERROR: $1"
+}
+
 sync_fw4_sw_flow_offload() {
 	local want_sw="$1"
 	local uci_bin="${TURBOACC_UCI:-uci}"
 	local fw_init="${TURBOACC_FW_INIT:-/etc/init.d/firewall}"
-	local cur_sw cur_hw changed=0
+	local reload_pending="${TURBOACC_FW4_RELOAD_PENDING_FILE:-/var/run/turboacc-fw4-reload}"
+	local pending cur_sw cur_hw changed=0 reload_rc delta_dir marker_created=0
 
-	command -v "$uci_bin" >/dev/null 2>&1 || return 0
+	case "$want_sw" in
+	0|1) ;;
+	*) turboacc_error "invalid software flowtable setting"; return 1 ;;
+	esac
 
-	cur_sw="$("$uci_bin" -q get firewall.@defaults[0].flow_offloading 2>/dev/null)"
-	cur_hw="$("$uci_bin" -q get firewall.@defaults[0].flow_offloading_hw 2>/dev/null)"
+	command -v "$uci_bin" >/dev/null 2>&1 || {
+		turboacc_error "uci command is unavailable; cannot configure fw4 software flowtable"
+		return 1
+	}
+
+	pending="$("$uci_bin" -q changes firewall 2>/dev/null)" || {
+		turboacc_error "cannot inspect pending firewall UCI changes"
+		return 1
+	}
+	[ -z "$pending" ] || {
+		turboacc_error "firewall UCI has pre-existing staged changes; refusing to commit over them"
+		return 1
+	}
+
+	delta_dir="$(mktemp -d "${TURBOACC_UCI_TMPDIR:-/tmp}/turboacc-uci.XXXXXX" 2>/dev/null)" || {
+		turboacc_error "cannot create private fw4 UCI staging directory"
+		return 1
+	}
+	if ! "$uci_bin" -q -t "$delta_dir" get 'firewall.@defaults[0]' >/dev/null 2>&1; then
+		rm -rf "$delta_dir"
+		turboacc_error "fw4 defaults section is missing or unreadable"
+		return 1
+	fi
+
+	cur_sw="$("$uci_bin" -q -t "$delta_dir" get 'firewall.@defaults[0].flow_offloading' 2>/dev/null)" || cur_sw="0"
+	cur_hw="$("$uci_bin" -q -t "$delta_dir" get 'firewall.@defaults[0].flow_offloading_hw' 2>/dev/null)" || cur_hw="0"
 
 	if [ "$cur_sw" != "$want_sw" ]; then
-		"$uci_bin" -q set "firewall.@defaults[0].flow_offloading=$want_sw" >/dev/null 2>&1 && changed=1
+		if ! "$uci_bin" -q -t "$delta_dir" set "firewall.@defaults[0].flow_offloading=$want_sw" >/dev/null 2>&1; then
+			rm -rf "$delta_dir"
+			turboacc_error "cannot stage fw4 flow_offloading=$want_sw"
+			return 1
+		fi
+		changed=1
 	fi
 	if [ "$cur_hw" != "0" ]; then
-		"$uci_bin" -q set "firewall.@defaults[0].flow_offloading_hw=0" >/dev/null 2>&1 && changed=1
+		if ! "$uci_bin" -q -t "$delta_dir" set "firewall.@defaults[0].flow_offloading_hw=0" >/dev/null 2>&1; then
+			rm -rf "$delta_dir"
+			turboacc_error "cannot stage fw4 flow_offloading_hw=0"
+			return 1
+		fi
+		changed=1
 	fi
 
 	if [ "$changed" -eq 1 ]; then
-		"$uci_bin" -q commit firewall >/dev/null 2>&1
-		if [ -x "$fw_init" ]; then
-			"$fw_init" reload >/dev/null 2>&1 || true
+		if [ ! -e "$reload_pending" ]; then
+			if ! : >"$reload_pending" 2>/dev/null; then
+				rm -rf "$delta_dir"
+				turboacc_error "cannot record pending fw4 reload"
+				return 1
+			fi
+			marker_created=1
+		fi
+		# UCI -t writes to this private delta dir but still reads the shared
+		# default delta path. Refuse to commit if firewall changes appeared.
+		pending="$("$uci_bin" -q changes firewall 2>/dev/null)" || {
+			rm -rf "$delta_dir"
+			[ "$marker_created" -eq 0 ] || rm -f "$reload_pending"
+			turboacc_error "cannot recheck pending firewall UCI changes before commit"
+			return 1
+		}
+		if [ -n "$pending" ]; then
+			rm -rf "$delta_dir"
+			[ "$marker_created" -eq 0 ] || rm -f "$reload_pending"
+			turboacc_error "firewall UCI changes were staged concurrently; refusing to commit over them"
+			return 1
+		fi
+		if ! "$uci_bin" -q -t "$delta_dir" commit firewall >/dev/null 2>&1; then
+			rm -rf "$delta_dir"
+			[ "$marker_created" -eq 0 ] || rm -f "$reload_pending"
+			turboacc_error "cannot commit fw4 flowtable settings"
+			return 1
 		fi
 	fi
+	rm -rf "$delta_dir"
+
+	[ "$changed" -eq 1 ] || [ -e "$reload_pending" ] || return 0
+	[ -x "$fw_init" ] || {
+		turboacc_error "fw4 reload script is unavailable; desired flowtable settings are saved"
+		return 1
+	}
+	"$fw_init" reload >/dev/null 2>&1
+	reload_rc=$?
+	[ "$reload_rc" -eq 0 ] || {
+		turboacc_error "fw4 reload failed (exit $reload_rc); desired flowtable settings are saved"
+		return 1
+	}
+	rm -f "$reload_pending"
 	return 0
 }
 
@@ -154,13 +249,14 @@ default_fullcone_mode() {
 stop_service() {
 	local hnat_path
 	local fc_sysfs="${TURBOACC_FAST_CLASSIFIER_SYSFS:-/sys/fast_classifier}"
+	local fw4_error=""
 
 	ensure_debugfs
 	hnat_path="$(resolve_hnat_path)"
 
 	# disable HNAT hook if still accessible
 	disable_hnat_runtime "$hnat_path"
-	sync_fw4_sw_flow_offload "0"
+	sync_fw4_sw_flow_offload "0" || fw4_error="$TURBOACC_START_ERROR"
 
 	# clean up fast_classifier / shortcut_fe_cm if loaded
 	if module_loaded "fast_classifier"; then
@@ -182,6 +278,11 @@ stop_service() {
 	sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1
 
 	logger -t turboacc "stopped"
+	if [ -n "$fw4_error" ]; then
+		write_service_status error "$fw4_error"
+		return 1
+	fi
+	write_service_status stopped ""
 }
 
 inital_conf() {
@@ -196,12 +297,13 @@ inital_conf() {
 	fi
 }
 
-start_service() {
+_start_service_impl() {
 	config_load "turboacc"
 
 	local fastpath
 	local hnat_path
 	local fastpath_mh_eth_hnat="1"
+	local fw4_rc=0
 	inital_conf
 
 	# ---------- debugfs (required for HNAT knobs) ----------
@@ -217,7 +319,7 @@ start_service() {
 		config_get fastpath_fc_pkts "config" "fastpath_fc_pkts" ""
 
 		if ! ensure_kmod_loaded "fast_classifier" "fast-classifier"; then
-			logger -t turboacc "ERROR: fast_classifier module is not available; keeping existing HNAT state"
+			turboacc_error "fast_classifier module is not available; keeping existing HNAT state"
 			return 1
 		fi
 
@@ -233,13 +335,13 @@ start_service() {
 		if [ -d "$fc_sysfs" ]; then
 			if [ -w "$fc_sysfs/skip_to_bridge_ingress" ]; then
 				echo "$fastpath_fc_br" >"$fc_sysfs/skip_to_bridge_ingress" 2>/dev/null || {
-					logger -t turboacc "ERROR: failed to write $fc_sysfs/skip_to_bridge_ingress"
+					turboacc_error "failed to write $fc_sysfs/skip_to_bridge_ingress"
 					return 1
 				}
 			fi
 			if [ -n "$fastpath_fc_pkts" ] && [ -w "$fc_sysfs/offload_at_pkts" ]; then
 				echo "$fastpath_fc_pkts" >"$fc_sysfs/offload_at_pkts" 2>/dev/null || {
-					logger -t turboacc "ERROR: failed to write $fc_sysfs/offload_at_pkts"
+					turboacc_error "failed to write $fc_sysfs/offload_at_pkts"
 					return 1
 				}
 			fi
@@ -250,12 +352,12 @@ start_service() {
 		else
 			[ ! -e "/dev/sfe_ipv6" ] || rm -f "/dev/sfe_ipv6"
 		fi
-		sync_fw4_sw_flow_offload "0"
+		sync_fw4_sw_flow_offload "0" || fw4_rc=$?
 		logger -t turboacc "engine=fast_classifier br=$fastpath_fc_br v6=$fastpath_fc_ipv6"
 		;;
 	"shortcut_fe_cm")
 		if ! ensure_kmod_loaded "shortcut_fe_cm" "shortcut-fe-cm"; then
-			logger -t turboacc "ERROR: shortcut_fe_cm module is not available; keeping existing HNAT state"
+			turboacc_error "shortcut_fe_cm module is not available; keeping existing HNAT state"
 			return 1
 		fi
 
@@ -270,7 +372,7 @@ start_service() {
 			disable_hnat_runtime "$hnat_path"
 		fi
 
-		sync_fw4_sw_flow_offload "0"
+		sync_fw4_sw_flow_offload "0" || fw4_rc=$?
 		logger -t turboacc "engine=shortcut_fe_cm"
 		;;
 	"mediatek_hnat")
@@ -286,7 +388,7 @@ start_service() {
 
 		if ! hnat_module_loaded; then
 			if ! (try_modprobe "mtkhnat" || try_modprobe "mediatek_hnat"); then
-				logger -t turboacc "ERROR: cannot load mtkhnat/mediatek_hnat module"
+				turboacc_error "cannot load mtkhnat/mediatek_hnat module"
 				return 1
 			fi
 		fi
@@ -298,12 +400,12 @@ start_service() {
 
 		# hook_toggle: 1=enable global HNAT & WHNAT hooks, 0=disable
 		if [ ! -w "$hnat_path/hook_toggle" ]; then
-			logger -t turboacc "ERROR: MediaTek HNAT debugfs hook_toggle is not available"
+			turboacc_error "MediaTek HNAT debugfs hook_toggle is not available"
 			return 1
 		fi
 
 		if ! echo "$fastpath_mh_eth_hnat" >"$hnat_path/hook_toggle" 2>/dev/null; then
-			logger -t turboacc "ERROR: failed to write hook_toggle=$fastpath_mh_eth_hnat"
+			turboacc_error "failed to write MediaTek HNAT hook_toggle"
 			return 1
 		fi
 
@@ -317,30 +419,30 @@ start_service() {
 			# hnat_setting: cmd 8 = IPv6 HNAT toggle, cmd 11 = bind rate threshold
 			if [ -w "$hnat_path/hnat_setting" ]; then
 				hwrite "$hnat_path/hnat_setting" "8 $fastpath_mh_eth_hnat_v6" || {
-					logger -t turboacc "ERROR: failed to write hnat_setting (IPv6)"
+					turboacc_error "failed to write HNAT IPv6 setting"
 					return 1
 				}
 				hwrite "$hnat_path/hnat_setting" "11 $fastpath_mh_eth_hnat_bind_rate" || {
-					logger -t turboacc "ERROR: failed to write hnat_setting (bind_rate)"
+					turboacc_error "failed to write HNAT bind-rate setting"
 					return 1
 				}
 			fi
 
 			if _uci_bool_enabled "$fastpath_mh_sw_fallback"; then
-				sync_fw4_sw_flow_offload "1"
+				sync_fw4_sw_flow_offload "1" || fw4_rc=$?
 			else
-				sync_fw4_sw_flow_offload "0"
+				sync_fw4_sw_flow_offload "0" || fw4_rc=$?
 			fi
 
 			logger -t turboacc "engine=mediatek_hnat eth=$fastpath_mh_eth_hnat v6=$fastpath_mh_eth_hnat_v6 bind_rate=$fastpath_mh_eth_hnat_bind_rate sw_fallback=$fastpath_mh_sw_fallback"
 		else
 			if [ -w "$hnat_path/hnat_setting" ]; then
 				hwrite "$hnat_path/hnat_setting" "8 0" || {
-					logger -t turboacc "ERROR: failed to write hnat_setting (IPv6 disable)"
+					turboacc_error "failed to disable HNAT IPv6 setting"
 					return 1
 				}
 			fi
-			sync_fw4_sw_flow_offload "0"
+			sync_fw4_sw_flow_offload "0" || fw4_rc=$?
 			logger -t turboacc "engine=mediatek_hnat eth=0 (Global HNAT/WHNAT hooks disabled by config)"
 		fi
 		;;
@@ -357,11 +459,11 @@ start_service() {
 		if hnat_module_loaded && [ -w "$hnat_path/hook_toggle" ]; then
 			disable_hnat_runtime "$hnat_path"
 		fi
-		sync_fw4_sw_flow_offload "0"
+		sync_fw4_sw_flow_offload "0" || fw4_rc=$?
 		logger -t turboacc "engine=none (no fastpath selected)"
 		;;
 	*)
-		logger -t turboacc "ERROR: unsupported fastpath '$fastpath'; keeping existing HNAT state"
+		turboacc_error "unsupported fastpath; keeping existing HNAT state"
 		return 1
 		;;
 	esac
@@ -384,7 +486,25 @@ start_service() {
 		logger -t turboacc "WARNING: tcpcca=$tcpcca not available, keeping current"
 	fi
 
+	[ "$fw4_rc" -eq 0 ] || return "$fw4_rc"
 	logger -t turboacc "started (fastpath=$fastpath fullcone=$fullcone tcpcca=$tcpcca)"
+}
+
+start_service() {
+	local rc
+
+	TURBOACC_START_ERROR=""
+	write_service_status starting ""
+	_start_service_impl "$@"
+	rc=$?
+
+	if [ "$rc" -eq 0 ]; then
+		write_service_status ok ""
+	else
+		write_service_status error "${TURBOACC_START_ERROR:-TurboACC service start failed; see the system log}"
+	fi
+
+	return "$rc"
 }
 
 reload_service() {
