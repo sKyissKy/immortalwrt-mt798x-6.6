@@ -1,0 +1,476 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] net: mediatek: serialize the shared QDMA queue window
+
+The page selector and the TX queue counter mode control a shared frame
+engine register window. The Ethernet debugfs writer selects a page
+before copying user data, so a concurrent statistics read or HNAT
+shaper update can redirect writes to another queue.
+
+Use the same IRQ-safe lock for Ethernet and Vendor HNAT transactions.
+Select the page only after parsing, keep configuration and counter
+reads on their selected page, and restore the original window state
+before releasing the lock. Snapshot reset diagnostics before printing.
+Keep HNAT reservations and the associated shaper writes together.
+
+Source: Project-original. The affected debugfs writer originates in
+commit c8ad16d28d66 ("mediatek sdk:add kernel files"). The HNAT shaper
+was checked in the effective Refresh Linux 6.6.159 tree.
+Scope: MediaTek QDMA, including MT7987/MT7988 with Vendor HNAT.
+Build and hardware validation: pending.
+
+Signed-off-by: Codex <codex@openai.com>
+
+diff --git a/drivers/net/ethernet/mediatek/mtk_eth_dbg.c b/drivers/net/ethernet/mediatek/mtk_eth_dbg.c
+--- a/drivers/net/ethernet/mediatek/mtk_eth_dbg.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_dbg.c
+@@ -201,9 +201,13 @@
+ 			 (scheduling == 1) ? "WRR" : "SP", max_rate);
+ 
+ 	for (i = 0; i < 64; i++) {
+-		mtk_w32(eth, (i / MTK_QTX_PER_PAGE), soc->reg_map->qdma.page);
++		void __iomem *page_reg = eth->base + soc->reg_map->qdma.page;
++		struct mtk_qdma_page page;
++
++		mtk_qdma_select_page(&page, page_reg, i / MTK_QTX_PER_PAGE);
+ 		sch_reg = mtk_r32(eth, soc->reg_map->qdma.qtx_sch +
+ 				       (i % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
++		mtk_qdma_restore_page(&page, page_reg);
+ 		if (mtk_is_netsys_v2_or_greater(eth))
+ 			scheduler = FIELD_GET(MTK_QTX_SCH_TX_SEL_V2, sch_reg);
+ 		else
+@@ -297,10 +301,14 @@
+ {
+ 	struct mtk_eth *eth = g_eth;
+ 	const struct mtk_soc_data *soc = eth->soc;
++	void __iomem *page_reg = eth->base + soc->reg_map->qdma.page;
++	struct mtk_qdma_page page;
+ 	long id = (long)file->private_data;
+ 	char *buf;
+ 	unsigned int len = 0, buf_len = 1500;
+-	u32 qtx_sch, qtx_cfg;
++	u32 qtx_sch, qtx_cfg, packets = 0, drops = 0;
++	u32 ofs = (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET;
++	bool has_mib = mtk_is_netsys_v2_or_greater(eth);
+ 	int scheduler;
+ 	int min_rate_en, min_rate, min_rate_exp;
+ 	int max_rate_en, max_weight, max_rate, max_rate_exp;
+@@ -310,12 +318,23 @@
+ 	if (!buf)
+ 		return -ENOMEM;
+ 
+-	mtk_w32(eth, (id / MTK_QTX_PER_PAGE), soc->reg_map->qdma.page);
+-	qtx_cfg = mtk_r32(eth, soc->reg_map->qdma.qtx_cfg +
+-			       (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
+-	qtx_sch = mtk_r32(eth, soc->reg_map->qdma.qtx_sch +
+-			       (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
+-	if (mtk_is_netsys_v2_or_greater(eth))
++	mtk_qdma_select_page(&page, page_reg, id / MTK_QTX_PER_PAGE);
++	qtx_cfg = mtk_r32(eth, soc->reg_map->qdma.qtx_cfg + ofs);
++	qtx_sch = mtk_r32(eth, soc->reg_map->qdma.qtx_sch + ofs);
++	if (has_mib) {
++		u32 mib_if = soc->reg_map->qdma.qtx_mib_if;
++		u32 mib_prev = mtk_r32(eth, mib_if);
++
++		mtk_m32(eth, MTK_MIB_ON_QTX_CFG, MTK_MIB_ON_QTX_CFG, mib_if);
++		mtk_m32(eth, MTK_VQTX_MIB_EN, MTK_VQTX_MIB_EN, mib_if);
++		packets = mtk_r32(eth, soc->reg_map->qdma.qtx_cfg + ofs);
++		drops = mtk_r32(eth, soc->reg_map->qdma.qtx_sch + ofs);
++		mtk_m32(eth, MTK_MIB_ON_QTX_CFG, mib_prev & MTK_MIB_ON_QTX_CFG, mib_if);
++		mtk_m32(eth, MTK_VQTX_MIB_EN, mib_prev & MTK_VQTX_MIB_EN, mib_if);
++	}
++	mtk_qdma_restore_page(&page, page_reg);
++
++	if (has_mib)
+ 		scheduler = FIELD_GET(MTK_QTX_SCH_TX_SEL_V2, qtx_sch);
+ 	else
+ 		scheduler = FIELD_GET(MTK_QTX_SCH_TX_SEL, qtx_sch);
+@@ -347,22 +366,11 @@
+ 			 "scheduler: %d\nhw resv: %d\nsw resv: %d\n", scheduler,
+ 			 (qtx_cfg >> 8) & 0xff, qtx_cfg & 0xff);
+ 
+-	if (mtk_is_netsys_v2_or_greater(eth)) {
+-		/* Switch to debug mode */
+-		mtk_m32(eth, MTK_MIB_ON_QTX_CFG, MTK_MIB_ON_QTX_CFG, soc->reg_map->qdma.qtx_mib_if);
+-		mtk_m32(eth, MTK_VQTX_MIB_EN, MTK_VQTX_MIB_EN, soc->reg_map->qdma.qtx_mib_if);
+-		qtx_cfg = mtk_r32(eth, soc->reg_map->qdma.qtx_cfg +
+-				       (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
+-		qtx_sch = mtk_r32(eth, soc->reg_map->qdma.qtx_sch +
+-				       (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
++	if (has_mib) {
+ 		len += scnprintf(buf + len, buf_len - len,
+-				 "packet count: %u\n", qtx_cfg);
++				 "packet count: %u\n", packets);
+ 		len += scnprintf(buf + len, buf_len - len,
+-				 "packet drop: %u\n\n", qtx_sch);
+-
+-		/* Recover to normal mode */
+-		mtk_m32(eth, MTK_MIB_ON_QTX_CFG, 0, soc->reg_map->qdma.qtx_mib_if);
+-		mtk_m32(eth, MTK_VQTX_MIB_EN, 0, soc->reg_map->qdma.qtx_mib_if);
++				 "packet drop: %u\n\n", drops);
+ 	}
+ 
+ 	len += scnprintf(buf + len, buf_len - len,
+@@ -389,6 +397,8 @@
+ {
+ 	struct mtk_eth *eth = g_eth;
+ 	const struct mtk_soc_data *soc = eth->soc;
++	void __iomem *page_reg = eth->base + soc->reg_map->qdma.page;
++	struct mtk_qdma_page page;
+ 	long id = (long)file->private_data;
+ 	char line[64] = {0};
+ 	int max_enable, max_rate, max_exp = 0;
+@@ -397,9 +407,9 @@
+ 	int resv;
+ 	int scheduler;
+ 	size_t size;
+-	u32 qtx_sch = 0, qtx_cfg = 0;
+-
+-	mtk_w32(eth, (id / MTK_QTX_PER_PAGE), soc->reg_map->qdma.page);
++	u32 qtx_sch = 0, qtx_cfg;
++	u32 ofs = (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET;
++
+ 	if (length >= sizeof(line))
+ 		return -EINVAL;
+ 
+@@ -458,16 +468,15 @@
+ 		qtx_sch |= FIELD_PREP(MTK_QTX_SCH_MAX_RATE_MAN, max_rate);
+ 		qtx_sch |= FIELD_PREP(MTK_QTX_SCH_MAX_RATE_EXP, max_exp);
+ 	}
+-	mtk_w32(eth, qtx_sch, soc->reg_map->qdma.qtx_sch +
+-			      (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
+-
+-	qtx_cfg = mtk_r32(eth, soc->reg_map->qdma.qtx_cfg +
+-			       (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
++	mtk_qdma_select_page(&page, page_reg, id / MTK_QTX_PER_PAGE);
++	mtk_w32(eth, qtx_sch, soc->reg_map->qdma.qtx_sch + ofs);
++
++	qtx_cfg = mtk_r32(eth, soc->reg_map->qdma.qtx_cfg + ofs);
+ 	qtx_cfg &= 0xffff0000;
+ 	qtx_cfg |= FIELD_PREP(MTK_QTX_CFG_HW_RESV, resv);
+ 	qtx_cfg |= FIELD_PREP(MTK_QTX_CFG_SW_RESV, resv);
+-	mtk_w32(eth, qtx_cfg, soc->reg_map->qdma.qtx_cfg +
+-			      (id % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
++	mtk_w32(eth, qtx_cfg, soc->reg_map->qdma.qtx_cfg + ofs);
++	mtk_qdma_restore_page(&page, page_reg);
+ 
+ 	size = strlen(line);
+ 	*offset += size;
+diff --git a/drivers/net/ethernet/mediatek/mtk_eth_soc.c b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.c
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.c
+@@ -47,6 +47,9 @@
+ #endif
+ struct net_device *ppd_dev;
+ EXPORT_SYMBOL(ppd_dev);
++DEFINE_SPINLOCK(mtk_qdma_window_lock);
++EXPORT_SYMBOL_GPL(mtk_qdma_window_lock);
++
+ static int mtk_msg_level = -1;
+ module_param_named(msg_level, mtk_msg_level, int, 0);
+ MODULE_PARM_DESC(msg_level, "Message level (-1=defaults,0=none,...,16=all)");
+@@ -1029,6 +1032,8 @@
+ 				int speed)
+ {
+ 	const struct mtk_soc_data *soc = eth->soc;
++	void __iomem *page_reg = eth->base + soc->reg_map->qdma.page;
++	struct mtk_qdma_page page;
+ 	u32 ofs, val;
+ 
+ 	if (!MTK_HAS_CAPS(soc->caps, MTK_QDMA))
+@@ -1139,9 +1144,10 @@
+ 		eth->qdma_shaper.speed[idx] = speed;
+ 
+ out:
+-	mtk_w32(eth, (idx / MTK_QTX_PER_PAGE), soc->reg_map->qdma.page);
+ 	ofs = MTK_QTX_OFFSET * (idx % MTK_QTX_PER_PAGE);
++	mtk_qdma_select_page(&page, page_reg, idx / MTK_QTX_PER_PAGE);
+ 	mtk_w32(eth, val, soc->reg_map->qdma.qtx_sch + ofs);
++	mtk_qdma_restore_page(&page, page_reg);
+ }
+ 
+ static void mtk_gdm_mac_setup_eee(struct mtk_mac *mac, bool enable)
+@@ -3257,6 +3263,8 @@
+ 	wmb();
+ 
+ 	if (MTK_HAS_CAPS(soc->caps, MTK_QDMA)) {
++		void __iomem *page_reg = eth->base + soc->reg_map->qdma.page;
++
+ 		mtk_w32(eth, ring->phys, soc->reg_map->qdma.ctx_ptr);
+ 		mtk_w32(eth, ring->phys, soc->reg_map->qdma.dtx_ptr);
+ 		mtk_w32(eth,
+@@ -3265,10 +3273,8 @@
+ 		mtk_w32(eth, ring->last_free_ptr, soc->reg_map->qdma.drx_ptr);
+ 
+ 		for (i = 0, ofs = 0; i < MTK_QDMA_NUM_QUEUES; i++) {
+-			mtk_w32(eth, (i / MTK_QTX_PER_PAGE), soc->reg_map->qdma.page);
+-
+-			val = (QDMA_RES_THRES << 8) | QDMA_RES_THRES;
+-			mtk_w32(eth, val, soc->reg_map->qdma.qtx_cfg + ofs);
++			struct mtk_qdma_page page;
++			u32 cfg = (QDMA_RES_THRES << 8) | QDMA_RES_THRES;
+ 
+ 			val = MTK_QTX_SCH_MIN_RATE_EN |
+ 			      MTK_QTX_SCH_LEAKY_BUCKET_SIZE;
+@@ -3283,7 +3289,11 @@
+ 			}
+ 			if (mtk_is_netsys_v1(eth))
+ 				val |= MTK_QTX_SCH_LEAKY_BUCKET_EN;
++
++			mtk_qdma_select_page(&page, page_reg, i / MTK_QTX_PER_PAGE);
++			mtk_w32(eth, cfg, soc->reg_map->qdma.qtx_cfg + ofs);
+ 			mtk_w32(eth, val, soc->reg_map->qdma.qtx_sch + ofs);
++			mtk_qdma_restore_page(&page, page_reg);
+ 			ofs = (ofs + MTK_QTX_OFFSET) % (MTK_QTX_OFFSET * MTK_QTX_PER_PAGE);
+ 		}
+ 		val = MTK_QDMA_TX_SCH_MAX_WFQ | (MTK_QDMA_TX_SCH_MAX_WFQ << 16);
+@@ -5011,17 +5021,29 @@
+ static void mtk_hw_dump_all(struct mtk_eth *eth)
+ {
+ 	const struct mtk_reg_map *reg_map = eth->soc->reg_map;
+-	u32 id;
+ 
+ 	mtk_hw_dump_reg(eth, "FE", 0x0, 0x600);
+ 	mtk_hw_dump_reg(eth, "FE", 0x1400, 0x300);
+ 	mtk_hw_dump_reg(eth, "ADMA", reg_map->pdma.rx_ptr, 0x300);
+ 	if (MTK_HAS_CAPS(eth->soc->caps, MTK_QDMA)) {
++		void __iomem *page_reg = eth->base + reg_map->qdma.page;
++		u32 id;
++
+ 		for (id = 0; id < MTK_QDMA_NUM_QUEUES / MTK_QTX_PER_PAGE; id++) {
+-			mtk_w32(eth, id, reg_map->qdma.page);
+-			pr_info("\nQDMA PAGE:%x ", mtk_r32(eth, reg_map->qdma.page));
+-			mtk_hw_dump_reg(eth, "QDMA", reg_map->qdma.qtx_cfg, 0x100);
+-			mtk_w32(eth, 0, reg_map->qdma.page);
++			struct mtk_qdma_page page;
++			u32 regs[0x100 / sizeof(u32)];
++			unsigned int i;
++
++			mtk_qdma_select_page(&page, page_reg, id);
++			for (i = 0; i < ARRAY_SIZE(regs); i++)
++				regs[i] = mtk_r32(eth, reg_map->qdma.qtx_cfg + i * sizeof(u32));
++			mtk_qdma_restore_page(&page, page_reg);
++
++			pr_info("\nQDMA PAGE:%x\n", id);
++			for (i = 0; i < ARRAY_SIZE(regs); i += 4)
++				pr_info("0x%08x: %08x %08x %08x %08x\n",
++					reg_map->qdma.qtx_cfg + i * 4, regs[i],
++					regs[i + 1], regs[i + 2], regs[i + 3]);
+ 		}
+ 		mtk_hw_dump_reg(eth, "QDMA", reg_map->qdma.rx_ptr, 0x300);
+ 	}
+@@ -6813,19 +6835,21 @@
+ {
+ 	const struct mtk_reg_map *reg_map = eth->soc->reg_map;
+ 	struct mtk_qdma_params *params = &eth->qdma_params;
++	void __iomem *page_reg = eth->base + reg_map->qdma.page;
+ 	int i;
+ 
+ 	for (i = 0; i < MTK_QDMA_NUM_QUEUES; i++) {
+-		mtk_w32(eth, (i / MTK_QTX_PER_PAGE), reg_map->qdma.page);
+-
++		struct mtk_qdma_page page;
++
++		mtk_qdma_select_page(&page, page_reg, i / MTK_QTX_PER_PAGE);
+ 		params->qtx_cfg[i] =
+ 			mtk_r32(eth, reg_map->qdma.qtx_cfg +
+ 				(i % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
+ 		params->qtx_sch[i] =
+ 			mtk_r32(eth, reg_map->qdma.qtx_sch +
+ 				(i % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
+-	}
+-	mtk_w32(eth, 0, reg_map->qdma.page);
++		mtk_qdma_restore_page(&page, page_reg);
++	}
+ 
+ 	params->tx_sch[0] = mtk_r32(eth, reg_map->qdma.tx_sch_rate);
+ 	if (mtk_is_netsys_v2_or_greater(eth))
+@@ -6837,19 +6861,21 @@
+ {
+ 	const struct mtk_reg_map *reg_map = eth->soc->reg_map;
+ 	struct mtk_qdma_params *params = &eth->qdma_params;
++	void __iomem *page_reg = eth->base + reg_map->qdma.page;
+ 	int i;
+ 
+ 	for (i = 0; i < MTK_QDMA_NUM_QUEUES; i++) {
+-		mtk_w32(eth, (i / MTK_QTX_PER_PAGE), reg_map->qdma.page);
+-
++		struct mtk_qdma_page page;
++
++		mtk_qdma_select_page(&page, page_reg, i / MTK_QTX_PER_PAGE);
+ 		mtk_w32(eth, params->qtx_cfg[i],
+ 			reg_map->qdma.qtx_cfg +
+ 			(i % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
+ 		mtk_w32(eth, params->qtx_sch[i],
+ 			reg_map->qdma.qtx_sch +
+ 			(i % MTK_QTX_PER_PAGE) * MTK_QTX_OFFSET);
+-	}
+-	mtk_w32(eth, 0, reg_map->qdma.page);
++		mtk_qdma_restore_page(&page, page_reg);
++	}
+ 
+ 	mtk_w32(eth, params->tx_sch[0], reg_map->qdma.tx_sch_rate);
+ 	if (mtk_is_netsys_v2_or_greater(eth))
+diff --git a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -2805,12 +2805,14 @@
+ 	return single_open(file, hnat_qos_toggle_read, file->private_data);
+ }
+ 
+-void hnat_qos_shaper_ebl(u32 id, u32 enable)
++static void hnat_qos_program_shaper(u32 id, bool enable, bool set_resv)
+ {
+ 	struct mtk_hnat *h = hnat_priv;
+-	u32 cfg;
+-
+-	cr_set_field(h->fe_base + QDMA_PAGE, QTX_CFG_PAGE, (id / NUM_OF_Q_PER_PAGE));
++	void __iomem *page_reg = h->fe_base + QDMA_PAGE;
++	struct mtk_qdma_page page;
++	u32 queue = id % NUM_OF_Q_PER_PAGE;
++	u32 cfg = 0;
++
+ 	if (enable) {
+ 		cfg = QTX_SCH_MIN_RATE_EN | QTX_SCH_MAX_RATE_EN;
+ 		cfg |= (1 << QTX_SCH_MIN_RATE_MAN_OFFSET) |
+@@ -2818,11 +2820,19 @@
+ 		       (25 << QTX_SCH_MAX_RATE_MAN_OFFSET) |
+ 		       (5 << QTX_SCH_MAX_RATE_EXP_OFFSET) |
+ 		       (4 << QTX_SCH_MAX_RATE_WGHT_OFFSET);
+-
+-		writel(cfg, h->fe_base + QTX_SCH(id % NUM_OF_Q_PER_PAGE));
+-	} else {
+-		writel(0, h->fe_base + QTX_SCH(id % NUM_OF_Q_PER_PAGE));
+-	}
++	}
++
++	mtk_qdma_select_page(&page, page_reg, id / NUM_OF_Q_PER_PAGE);
++	writel(cfg, h->fe_base + QTX_SCH(queue));
++	if (set_resv)
++		writel((4 << QTX_CFG_HW_RESV_CNT_OFFSET) |
++		       (4 << QTX_CFG_SW_RESV_CNT_OFFSET), h->fe_base + QTX_CFG(queue));
++	mtk_qdma_restore_page(&page, page_reg);
++}
++
++void hnat_qos_shaper_ebl(u32 id, u32 enable)
++{
++	hnat_qos_program_shaper(id, enable, false);
+ }
+ 
+ static void hnat_qos_disable(void)
+@@ -2830,12 +2840,8 @@
+ 	struct mtk_hnat *h = hnat_priv;
+ 	u32 id, cfg;
+ 
+-	for (id = 0; id < MAX_PPPQ_PORT_NUM; id++) {
+-		hnat_qos_shaper_ebl(id, 0);
+-		writel((4 << QTX_CFG_HW_RESV_CNT_OFFSET) |
+-		       (4 << QTX_CFG_SW_RESV_CNT_OFFSET),
+-		       h->fe_base + QTX_CFG(id % NUM_OF_Q_PER_PAGE));
+-	}
++	for (id = 0; id < MAX_PPPQ_PORT_NUM; id++)
++		hnat_qos_program_shaper(id, false, true);
+ 
+ 	cfg = (QDMA_TX_SCH_WFQ_EN) | (QDMA_TX_SCH_WFQ_EN << 16);
+ 	for (id = 0; id < h->data->num_of_sch; id += 2) {
+@@ -2851,16 +2857,8 @@
+ 	struct mtk_hnat *h = hnat_priv;
+ 	u32 id, cfg;
+ 
+-	for (id = 0; id < MAX_PPPQ_PORT_NUM; id++) {
+-		if (hook_toggle)
+-			hnat_qos_shaper_ebl(id, 1);
+-		else
+-			hnat_qos_shaper_ebl(id, 0);
+-
+-		writel((4 << QTX_CFG_HW_RESV_CNT_OFFSET) |
+-		       (4 << QTX_CFG_SW_RESV_CNT_OFFSET),
+-		       h->fe_base + QTX_CFG(id % NUM_OF_Q_PER_PAGE));
+-	}
++	for (id = 0; id < MAX_PPPQ_PORT_NUM; id++)
++		hnat_qos_program_shaper(id, hook_toggle, true);
+ 
+ 	cfg = (QDMA_TX_SCH_WFQ_EN) | (QDMA_TX_SCH_WFQ_EN << 16);
+ 	for (id = 0; id < h->data->num_of_sch; id+= 2) {
+diff --git a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -3061,6 +3061,8 @@
+ static inline void hnat_qos_rate_limit_set(u32 id, const struct net_device *dev)
+ {
+ 	const struct mtk_mac *mac;
++	struct mtk_qdma_page page;
++	void __iomem *page_reg;
+ 	u32 max_man = SPEED_10000 / SPEED_100;
+ 	u32 max_exp = 5;
+ 	u32 cfg;
+@@ -3085,15 +3087,16 @@
+ 	}
+ 
+ setup_rate_limit:
+-	cr_set_field(hnat_priv->fe_base + QDMA_PAGE, QTX_CFG_PAGE,
+-		     (id / NUM_OF_Q_PER_PAGE));
+ 	cfg = QTX_SCH_MIN_RATE_EN | QTX_SCH_MAX_RATE_EN;
+ 	cfg |= (1 << QTX_SCH_MIN_RATE_MAN_OFFSET) |
+ 	       (4 << QTX_SCH_MIN_RATE_EXP_OFFSET) |
+ 	       ((max_man & 0x7f) << QTX_SCH_MAX_RATE_MAN_OFFSET) |
+ 	       ((max_exp & 0xf) << QTX_SCH_MAX_RATE_EXP_OFFSET) |
+ 	       (4 << QTX_SCH_MAX_RATE_WGHT_OFFSET);
++	page_reg = hnat_priv->fe_base + QDMA_PAGE;
++	mtk_qdma_select_page(&page, page_reg, id / NUM_OF_Q_PER_PAGE);
+ 	writel(cfg, hnat_priv->fe_base + QTX_SCH(id % NUM_OF_Q_PER_PAGE));
++	mtk_qdma_restore_page(&page, page_reg);
+ }
+ 
+ static inline void hnat_fill_offload_engine_entry(struct sk_buff *skb,
+diff --git a/drivers/net/ethernet/mediatek/mtk_eth_soc.h b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+--- a/drivers/net/ethernet/mediatek/mtk_eth_soc.h
++++ b/drivers/net/ethernet/mediatek/mtk_eth_soc.h
+@@ -11,6 +11,7 @@
+ 
+ #include <linux/dma-mapping.h>
+ #include <linux/netdevice.h>
++#include <linux/io.h>
+ #include <linux/of_net.h>
+ #include <linux/u64_stats_sync.h>
+ #include <linux/refcount.h>
+@@ -19,6 +20,7 @@
+ #include <linux/rhashtable.h>
+ #include <linux/dim.h>
+ #include <linux/bitfield.h>
++#include <linux/spinlock.h>
+ #include <net/page_pool/types.h>
+ #include <linux/bpf_trace.h>
+ #include "mtk_ppe.h"
+@@ -2046,6 +2048,32 @@
+ u32 mtk_r32(struct mtk_eth *eth, unsigned reg);
+ u32 mtk_m32(struct mtk_eth *eth, u32 mask, u32 set, unsigned int reg);
+ 
++/* The Ethernet driver and Vendor HNAT map the same FE QDMA window. */
++extern spinlock_t mtk_qdma_window_lock;
++
++struct mtk_qdma_page {
++	unsigned long flags;
++	u32 prev;
++};
++
++static inline void mtk_qdma_select_page(struct mtk_qdma_page *page,
++					void __iomem *reg, u32 index)
++{
++	spin_lock_irqsave(&mtk_qdma_window_lock, page->flags);
++	page->prev = readl(reg);
++	writel((page->prev & ~GENMASK(3, 0)) |
++	       FIELD_PREP(GENMASK(3, 0), index), reg);
++}
++
++static inline void mtk_qdma_restore_page(struct mtk_qdma_page *page,
++					 void __iomem *reg)
++{
++	writel(page->prev, reg);
++	/* Complete the register writes before a different CPU selects a page. */
++	readl(reg);
++	spin_unlock_irqrestore(&mtk_qdma_window_lock, page->flags);
++}
++
+ static inline bool mtk_eth_has_ppe_id(struct mtk_eth *eth, u32 id)
+ {
+ 	if (!eth || id >= ARRAY_SIZE(eth->ppe_policy))
