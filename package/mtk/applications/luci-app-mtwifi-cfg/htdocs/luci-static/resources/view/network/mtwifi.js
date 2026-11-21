@@ -352,7 +352,7 @@ function network_updown(id, map, ev) {
 	}
 
 	return map.save().then(function() {
-		ui.changes.apply()
+		ui.changes.apply(true);
 	});
 }
 
@@ -900,7 +900,8 @@ return view.extend({
 	callUciRename: rpc.declare({
 		object: 'uci',
 		method: 'rename',
-		params: [ 'config', 'section', 'name' ]
+		params: [ 'config', 'section', 'name' ],
+		reject: true
 	}),
 
 	render: function() {
@@ -927,7 +928,7 @@ return view.extend({
 
 		return Promise.all(tasks)
 			.then(L.bind(ui.changes.init, ui.changes))
-			.then(L.bind(ui.changes.apply, ui.changes));
+			.then(function() { ui.changes.apply(true); });
 	},
 
 	renderMigration: function() {
