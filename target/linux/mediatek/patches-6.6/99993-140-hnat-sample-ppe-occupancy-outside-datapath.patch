@@ -23,7 +23,7 @@ Signed-off-by: Codex <codex@openai.com>
  #include <linux/timer.h>
  #include <linux/wait.h>
  #include <net/netfilter/nf_flow_table.h>
-@@ -756,6 +757,83 @@
+@@ -756,6 +757,86 @@
  
  static int hnat_release_ppe_tables_locked(
  	struct mtk_hnat *h, struct mtk_eth_hnat_tx *tx, u32 id);
@@ -59,9 +59,12 @@ Signed-off-by: Codex <codex@openai.com>
 +			}
 +
 +			end = min(start + HNAT_PPE_SAMPLE_CHUNK, h->foe_etry_num);
-+			for (i = start; i < end; i++)
-+				if (entry_hnat_is_bound(&table[i]))
++			for (i = start; i < end; i++) {
++				const struct foe_entry *entry = &table[i];
++
++				if (entry_hnat_is_bound(entry))
 +					bound++;
++			}
 +			spin_unlock_bh(&h->entry_lock);
 +
 +			total += end - start;
