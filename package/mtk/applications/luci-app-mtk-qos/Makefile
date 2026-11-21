@@ -3,7 +3,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-mtk-qos
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=Apache-2.0
 
 LUCI_TITLE:=LuCI support for MediaTek NETSYS v3 4-Coprocessor Unified QoS

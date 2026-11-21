@@ -228,3 +228,12 @@ msgstr "配置已成功应用。"
 
 msgid "Failed to apply configuration: %s"
 msgstr "应用配置失败：%s"
+
+msgid "Last Apply"
+msgstr "最近应用状态"
+
+msgid "Success"
+msgstr "成功"
+
+msgid "Failed"
+msgstr "失败"

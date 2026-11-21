@@ -8,9 +8,6 @@
 			"uci": [ "mtk_qos" ]
 		},
 		"write": {
-			"ubus": {
-				"luci.mtk_qos": [ "apply" ]
-			},
 			"uci": [ "mtk_qos" ]
 		}
 	}

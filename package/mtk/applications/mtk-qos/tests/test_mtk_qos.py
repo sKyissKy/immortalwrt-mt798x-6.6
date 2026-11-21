@@ -21,6 +21,7 @@ class FakeSysEnv:
         self.qdma_dir = tmp / "qdma"
         self.hnat_dir = tmp / "hnat"
         self.pce_dir = tmp / "pce"
+        self.ppe_status = tmp / "mtk_flow_multitier"
         self.dt_compat = tmp / "dt_compatible"
         self.sys_net = tmp / "sys_net"
         self.sys_mod = tmp / "sys_mod"
@@ -28,6 +29,7 @@ class FakeSysEnv:
         self.leases = tmp / "dhcp.leases"
         self.arp = tmp / "arp"
         self.logs = tmp / "logs"
+        self.queue_reads = self.logs / "queue_reads.log"
 
         for d in [
             self.bin_dir,
@@ -71,6 +73,7 @@ class FakeSysEnv:
             "all_entry": "state=BIND\nstate=BIND\nstate=UNBIND\n",
         }.items():
             (self.hnat_dir / fname).write_text(content)
+        self.ppe_status.write_text("tier1_ppe_bind 2\ntier1_ppe_total 4096\n")
         (self.pce_dir / "cls_entry").write_text("")
 
         self.uci_kv = {
@@ -121,6 +124,14 @@ esac
 """
         rec_sh = lambda name: f"""#!/bin/sh
 printf '%s\\n' "$*" >> {str(self.logs / (name + '.log'))!r}
+"""
+        awk_sh = f"""#!/bin/sh
+for arg do
+  case "$arg" in
+    {str(self.qdma_dir)}/qdma_txq*) printf '%s\\n' "$arg" >> {str(self.queue_reads)!r} ;;
+  esac
+done
+exec /usr/bin/awk "$@"
 """
         ucode_sh = f"""#!/usr/bin/env python3
 import json, pathlib, re, sys
@@ -191,6 +202,7 @@ pathlib.Path(opts['out-slots']).write_text(('\\n'.join(slots) + '\\n') if slots 
             "ubus": "#!/bin/sh\necho '{}'\n",
             "logger": "#!/bin/sh\nexit 0\n",
             "ucode": ucode_sh,
+            "awk": awk_sh,
         }
         for name, body in scripts.items():
             p = self.bin_dir / name
@@ -216,6 +228,7 @@ pathlib.Path(opts['out-slots']).write_text(('\\n'.join(slots) + '\\n') if slots 
         env["MTK_QOS_QDMA_DIR"] = str(self.qdma_dir)
         env["MTK_QOS_HNAT_DIR"] = str(self.hnat_dir)
         env["MTK_QOS_PCE_DIR"] = str(self.pce_dir)
+        env["MTK_QOS_PPE_STATUS"] = str(self.ppe_status)
         env["MTK_QOS_DT_COMPAT"] = str(self.dt_compat)
         env["MTK_QOS_SYS_NET"] = str(self.sys_net)
         env["MTK_QOS_SYS_MOD"] = str(self.sys_mod)
@@ -355,6 +368,64 @@ class MtkQosTests(unittest.TestCase):
             res2 = env.run("start")
             self.assertEqual(res2.returncode, 0, res2.stderr)
             self.assertEqual((env.hnat_dir / "qos_toggle").read_text().strip(), "1 uplink")
+
+    def test_status_uses_cached_tier1_occupancy(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            env.ppe_status.write_text("tier1_ppe_bind 17\ntier1_ppe_total 1024\n")
+            (env.hnat_dir / "all_entry").write_text("state=BIND\n" * 200)
+
+            res = env.run("json")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            status = json.loads(res.stdout)
+            self.assertEqual(status["ppe_bound"], 17)
+            self.assertEqual(status["ppe_total"], 1024)
+
+            env.ppe_status.write_text("tier1_ppe_bind 17\n")
+            unknown = json.loads(env.run("json").stdout)
+            self.assertIsNone(unknown["ppe_bound"])
+            self.assertEqual(unknown["ppe_total"], 0)
+
+    def test_json_reads_each_qdma_queue_file_once(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            (env.qdma_dir / "qdma_txq1").write_text(
+                "scheduler: 0\npacket count: 41\npacket drop: 3\n"
+            )
+
+            res = env.run("json")
+            self.assertEqual(res.returncode, 0, res.stderr)
+            status = json.loads(res.stdout)
+            self.assertEqual(status["queues"]["ul_eqos"], [41, 3])
+            queue_reads = env.queue_reads.read_text().splitlines()
+            self.assertEqual(len(queue_reads), 62)
+            self.assertEqual(len(set(queue_reads)), 62)
+
+    def test_mandatory_hardware_write_failures_are_reported(self):
+        for missing in ("qdma_txq2", "hnat_qos_toggle"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as td:
+                env = FakeSysEnv(Path(td))
+                if missing == "qdma_txq2":
+                    (env.qdma_dir / missing).unlink()
+                else:
+                    (env.hnat_dir / "qos_toggle").unlink()
+
+                res = env.run("start")
+                self.assertNotEqual(res.returncode, 0)
+                self.assertIn("failed", res.stderr)
+                self.assertEqual((env.run_dir / "last_apply").read_text().strip(), "failed")
+
+    def test_failed_apply_is_visible_after_prior_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            self.assertEqual(env.run("start").returncode, 0)
+            (env.qdma_dir / "qdma_txq2").unlink()
+
+            failed = env.run("reload")
+            self.assertNotEqual(failed.returncode, 0)
+            status = json.loads(env.run("json").stdout)
+            self.assertEqual(status["active"], 1)
+            self.assertEqual(status["last_apply"], "failed")
 
 
 if __name__ == "__main__":

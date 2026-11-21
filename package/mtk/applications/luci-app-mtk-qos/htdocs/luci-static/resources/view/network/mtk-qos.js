@@ -4,7 +4,6 @@
 'require form';
 'require poll';
 'require rpc';
-'require ui';
 'require view';
 
 var callGetStatus = rpc.declare({
@@ -18,27 +17,6 @@ var callGetHints = rpc.declare({
 	method: 'getHints',
 	expect: { '': {} }
 });
-
-var callApply = rpc.declare({
-	object: 'luci.mtk_qos',
-	method: 'apply',
-	expect: { '': {} }
-});
-
-function showBanner(title, children, timeoutMs, cssClass) {
-	var msg = (timeoutMs && timeoutMs > 0)
-		? ui.addTimeLimitedNotification(title, children, timeoutMs, cssClass)
-		: ui.addNotification(title, children, cssClass);
-	if (msg) {
-		msg.querySelectorAll('.btn').forEach(function(btn) {
-			btn.addEventListener('click', function() {
-				if (msg.parentNode)
-					msg.parentNode.removeChild(msg);
-			});
-		});
-	}
-	return msg;
-}
 
 function fmtPair(pair) {
 	if (!Array.isArray(pair) || pair.length < 2)
@@ -71,6 +49,7 @@ function updateStatusDOM(st) {
 		return;
 
 	var elState = document.getElementById('mtk-qos-state');
+	var elApply = document.getElementById('mtk-qos-last-apply');
 	var elWan = document.getElementById('mtk-qos-wan');
 	var elCoproc = document.getElementById('mtk-qos-coproc');
 	var elDl = document.getElementById('mtk-qos-dl');
@@ -88,6 +67,10 @@ function updateStatusDOM(st) {
 			elState.textContent = _('Stopped');
 	}
 
+	if (elApply)
+		elApply.textContent = st.last_apply === 'success' ? _('Success') :
+			(st.last_apply === 'failed' ? _('Failed') : '--');
+
 	if (elWan)
 		elWan.textContent = (st.wan_devs || st.wan_dev || '--') + ' [' + fmtWanKind(st.wan_kind) + ']';
 
@@ -99,7 +82,8 @@ function updateStatusDOM(st) {
 		else
 			pceText = pce.loaded ? (_('Loaded') + ' (' + (pce.active_cls || 0) + ' CLS)') : _('Unloaded');
 		elCoproc.textContent =
-			'PPE ' + _('Bound') + ': ' + (st.ppe_bound || 0) + ' (@' + (st.fast_bind_pkt || 5) + ' pkts)' +
+			'PPE ' + _('Bound') + ': ' + (st.ppe_bound != null ? st.ppe_bound : '--') +
+			(st.ppe_total > 0 ? '/' + st.ppe_total : '') + ' (@' + (st.fast_bind_pkt || 5) + ' pkts)' +
 			' | PCE: ' + pceText +
 			' | WED: ' + (st.wed_present ? _('Active') : _('Inactive')) +
 			' | hook=' + (st.hook_toggle ? 1 : 0) +
@@ -138,6 +122,13 @@ function updateStatusDOM(st) {
 	}
 }
 
+function pollStatus() {
+	if (!document.getElementById('mtk-qos-state'))
+		return Promise.resolve();
+
+	return callGetStatus().then(updateStatusDOM);
+}
+
 return view.extend({
 	load: function() {
 		return Promise.all([
@@ -155,14 +146,16 @@ return view.extend({
 			_('MediaTek NPU 4-Coprocessor Unified QoS'),
 			_('Simultaneous hardware EQoS per-host shaping, connection limiting, zero-copy L7 DPI classification, and 13-queue SQM via MT7987/MT7988 PCE + PPE + QDMA + WED across Wired WAN and 5G WWAN.')
 		);
-		this.map = m;
-
 		var s = m.section(form.NamedSection, '__status', '_status', _('Realtime 4-Coprocessor Status'));
 		s.render = function() {
 			var statusTable = E('table', { 'class': 'table' }, [
 				E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left', 'width': '28%' }, _('Engine Mode')),
 					E('td', { 'class': 'td left', 'id': 'mtk-qos-state' }, '--')
+				]),
+				E('tr', { 'class': 'tr' }, [
+					E('td', { 'class': 'td left', 'width': '28%' }, _('Last Apply')),
+					E('td', { 'class': 'td left', 'id': 'mtk-qos-last-apply' }, '--')
 				]),
 				E('tr', { 'class': 'tr' }, [
 					E('td', { 'class': 'td left', 'width': '28%' }, _('Bound WAN Interface(s)')),
@@ -185,12 +178,6 @@ return view.extend({
 					E('td', { 'class': 'td left', 'id': 'mtk-qos-dpi' }, '--')
 				])
 			]);
-
-			poll.add(function() {
-				return callGetStatus().then(function(res) {
-					updateStatusDOM(res);
-				});
-			}, 5);
 
 			var wrap = E('fieldset', { 'class': 'cbi-section' }, [
 				E('legend', {}, _('Realtime 4-Coprocessor Status')),
@@ -347,25 +334,8 @@ return view.extend({
 		o = s.option(form.Value, 'comment', _('Comment'));
 		o.placeholder = _('Device note');
 
+		poll.add(pollStatus, 10);
 		return m.render();
 	},
-
-	handleSaveApply: function(ev, mode) {
-		return this.map.save(null, true).then(function() {
-			return callApply().then(function(res) {
-				if (res && res.status)
-					updateStatusDOM(res.status);
-				if (!res || res.code !== 0) {
-					var msg = (res && res.output) ? res.output : _('Apply returned non-zero status');
-					throw new Error(msg);
-				}
-				showBanner(null, E('p', _('Configuration has been applied.')), 3500, 'info');
-			});
-		}).catch(function(err) {
-			showBanner(null, E('p', _('Failed to apply configuration: %s').format(err.message || err)), 0, 'error');
-		});
-	},
-
-	handleSave: null,
 	handleReset: null
 });

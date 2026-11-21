@@ -80,22 +80,6 @@ const methods = {
 		call: function() {
 			print(sprintf('%J\n', read_host_hints()));
 		}
-	},
-	apply: {
-		args: {},
-		call: function() {
-			let raw = run_capture('/etc/init.d/mtk_qos reload 2>&1; echo "__RC:$?"');
-			let rc = 1;
-			let m = match(raw, /__RC:(\d+)/);
-			if (m)
-				rc = int(m[1]);
-			let clean_out = trim(replace(raw, /__RC:\d+\s*$/, ''));
-			print(sprintf('%J\n', {
-				code: rc,
-				output: clean_out,
-				status: read_status_json()
-			}));
-		}
 	}
 };
 

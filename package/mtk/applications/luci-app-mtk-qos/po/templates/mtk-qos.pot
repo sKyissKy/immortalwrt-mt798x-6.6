@@ -228,3 +228,12 @@ msgstr ""
 
 msgid "Failed to apply configuration: %s"
 msgstr ""
+
+msgid "Last Apply"
+msgstr ""
+
+msgid "Success"
+msgstr ""
+
+msgid "Failed"
+msgstr ""
