@@ -351,9 +351,9 @@ function network_updown(id, map, ev) {
 			uci.set('wireless', radio, 'disabled', '1');
 	}
 
-	return map.save().then(function() {
-		ui.changes.apply(true);
-	});
+	return map.save()
+		.then(function() { return ui.changes.init(); })
+		.then(function() { ui.changes.apply(true); });
 }
 
 function next_free_sid(offset) {
@@ -927,8 +927,18 @@ return view.extend({
 		}
 
 		return Promise.all(tasks)
-			.then(L.bind(ui.changes.init, ui.changes))
-			.then(function() { ui.changes.apply(true); });
+			.then(function() { return ui.changes.init(); })
+			.then(function() { ui.changes.apply(true); })
+			.catch(function(err) {
+				ui.showModal(_('Wireless configuration migration'), [
+					E('p', err.message || String(err)),
+					E('div', { 'class': 'right' },
+						E('button', {
+							'class': 'btn cbi-button-action important',
+							'click': function() { window.location.reload(); }
+						}, _('Reload page')))
+				]);
+			});
 	},
 
 	renderMigration: function() {
