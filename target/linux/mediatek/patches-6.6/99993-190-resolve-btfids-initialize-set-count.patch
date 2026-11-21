@@ -1,0 +1,53 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] tools/bpf: initialize resolve_btfids set count
+
+Initialize the shared set count and scope SET/SET8 pointers to the
+branches that select them. Keep qsort and SET8 endianness conversion in
+their existing order while printing the selected count with its unsigned
+format.
+
+Source: Project-original; addresses GCC 15.2 maybe-uninitialized
+warnings in the Linux 6.6.159 host resolve_btfids build.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+--- a/tools/bpf/resolve_btfids/main.c
++++ b/tools/bpf/resolve_btfids/main.c
+@@ -671,8 +671,7 @@
+ 
+ 	next = rb_first(&obj->sets);
+ 	while (next) {
+-		struct btf_id_set8 *set8;
+-		struct btf_id_set *set;
++		u32 cnt = 0;
+ 		unsigned long addr, off;
+ 		struct btf_id *id;
+ 
+@@ -688,10 +687,14 @@
+ 		}
+ 
+ 		if (id->is_set) {
+-			set = data->d_buf + off;
++			struct btf_id_set *set = data->d_buf + off;
++
++			cnt = set->cnt;
+ 			qsort(set->ids, set->cnt, sizeof(set->ids[0]), cmp_id);
+ 		} else {
+-			set8 = data->d_buf + off;
++			struct btf_id_set8 *set8 = data->d_buf + off;
++
++			cnt = set8->cnt;
+ 			/*
+ 			 * Make sure id is at the beginning of the pairs
+ 			 * struct, otherwise the below qsort would not work.
+@@ -718,8 +721,8 @@
+ 			}
+ 		}
+ 
+-		pr_debug("sorting  addr %5lu: cnt %6d [%s]\n",
+-			 off, id->is_set ? set->cnt : set8->cnt, id->name);
++		pr_debug("sorting  addr %5lu: cnt %6u [%s]\n",
++			 off, cnt, id->name);
+ 
+ 		next = rb_next(next);
+ 	}

@@ -1,0 +1,47 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] tools/lib/bpf: set host CFLAGS before the architecture probe
+
+The resolve_btfids build invokes libbpf with CC=gcc and passes host flags
+through EXTRA_CFLAGS. OpenWrt also exports target CFLAGS into nested makes.
+tools/lib/bpf/Makefile includes Makefile.arch before selecting CFLAGS from
+EXTRA_CFLAGS. On Filogic, x86 host GCC sees -mcpu=cortex-a53+crypto in the
+LP64 probe and misdetects the 64-bit host.
+
+Select CFLAGS before including Makefile.arch so its probe uses host flags.
+
+Source: Project-original; applies to the Linux 6.6.159 host libbpf source
+used by tools/bpf/resolve_btfids.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/tools/lib/bpf/Makefile b/tools/lib/bpf/Makefile
+--- a/tools/lib/bpf/Makefile
++++ b/tools/lib/bpf/Makefile
+@@ -33,6 +33,13 @@
+ DESTDIR ?=
+ DESTDIR_SQ = '$(subst ','\'',$(DESTDIR))'
+ 
++# Set compile option CFLAGS
++ifdef EXTRA_CFLAGS
++  CFLAGS := $(EXTRA_CFLAGS)
++else
++  CFLAGS := -g -O2
++endif
++
+ include $(srctree)/tools/scripts/Makefile.arch
+ 
+ ifeq ($(LP64), 1)
+@@ -76,13 +83,6 @@
+ LIB_FILE	= libbpf.a libbpf.so*
+ PC_FILE		= libbpf.pc
+ 
+-# Set compile option CFLAGS
+-ifdef EXTRA_CFLAGS
+-  CFLAGS := $(EXTRA_CFLAGS)
+-else
+-  CFLAGS := -g -O2
+-endif
+-
+ # Append required CFLAGS
+ override CFLAGS += -std=gnu89
+ override CFLAGS += $(EXTRA_WARNINGS) -Wno-switch-enum
