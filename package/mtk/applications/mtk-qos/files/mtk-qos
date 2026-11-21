@@ -405,6 +405,10 @@ validate_config() {
 	in_range "$CFG_RT_PCT" 5 100 || { log_err "invalid realtime_pct: $CFG_RT_PCT"; return 1; }
 	in_range "$CFG_VID_PCT" 5 100 || { log_err "invalid video_pct: $CFG_VID_PCT"; return 1; }
 	in_range "$CFG_P2P_PCT" 1 100 || { log_err "invalid p2p_pct: $CFG_P2P_PCT"; return 1; }
+	case "$CFG_ACK_PRIO" in
+		0|1) ;;
+		*) log_err "invalid ack_prio: $CFG_ACK_PRIO"; return 1 ;;
+	esac
 	case "$CFG_SCH" in
 		wrr|sp) ;;
 		*) log_err "invalid scheduler: $CFG_SCH"; return 1 ;;
@@ -556,6 +560,7 @@ do_stop() {
 
 	if ! conflict_qos_active; then
 		debugfs_write "$HNAT_DIR/sqm_toggle" "0"
+		debugfs_write "$HNAT_DIR/qos_ack_prio" "1"
 		debugfs_write "$HNAT_DIR/qos_toggle" "0"
 		debugfs_write "$HNAT_DIR/hnat_setting" "11 30"
 		reset_all_qdma
@@ -661,6 +666,9 @@ do_start_impl() {
 		if [ -e "$HNAT_DIR/qos_dpi" ]; then
 			debugfs_write_required "$HNAT_DIR/qos_dpi" "$CFG_DPI" || { log_err "failed writing HNAT DPI setting"; return 1; }
 		fi
+		if [ -e "$HNAT_DIR/qos_ack_prio" ]; then
+			debugfs_write_required "$HNAT_DIR/qos_ack_prio" "$CFG_ACK_PRIO" || { log_err "failed writing HNAT ACK priority setting"; return 1; }
+		fi
 		if [ "$CFG_SQM" = "1" ] && { [ "$dl_eff" -gt 0 ] || [ "$ul_eff" -gt 0 ]; }; then
 			debugfs_write_required "$HNAT_DIR/sqm_toggle" "1" || { log_err "failed enabling mandatory HNAT SQM"; return 1; }
 		else
@@ -674,6 +682,7 @@ do_start_impl() {
 		reset_all_qdma
 		clear_pce_cls
 		debugfs_write "$HNAT_DIR/sqm_toggle" "0"
+		debugfs_write "$HNAT_DIR/qos_ack_prio" "1"
 		debugfs_write "$HNAT_DIR/qos_toggle" "0"
 		apply_cake_fallback "$primary_wan" "$dl_eff" "$ul_eff" || {
 			log_err "failed applying CAKE fallback on $primary_wan"

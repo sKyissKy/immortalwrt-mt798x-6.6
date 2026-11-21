@@ -1,0 +1,54 @@
+From: Codex <codex@openai.com>
+Subject: [PATCH] net: mediatek: honor HNAT ACK priority setting
+
+Expose the existing mtk-qos ack_prio option as a HNAT debugfs bool. Keep
+TCP control/ACK promotion enabled by default, and gate only its per-packet
+classification override so DSCP and application classifiers are unchanged.
+
+Source: Project-original; connects mtk-qos `ack_prio` to the active
+classification branch introduced by 99993-120.
+
+Signed-off-by: Codex <codex@openai.com>
+---
+diff --git a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_debugfs.c
+@@ -35,6 +35,7 @@
+ int tnl_toggle = 1;
+ int sqm_toggle;
+ int qos_dpi_toggle = 1;
++bool qos_ack_prio = true;
+ struct hnat_desc headroom[DEF_ETRY_NUM];
+ unsigned int dbg_cpu_reason_cnt[MAX_CRSN_NUM];
+ 
+@@ -3524,6 +3525,7 @@
+ 			    &hnat_sqm_toggle_fops);
+ 	debugfs_create_file("qos_dpi", 0644, root, h,
+ 			    &hnat_qos_dpi_fops);
++	debugfs_create_bool("qos_ack_prio", 0644, root, &qos_ack_prio);
+ 	debugfs_create_file("hnat_version", 0444, root, h,
+ 			    &hnat_version_fops);
+ 	debugfs_create_file("hnat_ppd_if", 0444, root, h,
+diff --git a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat.h
+@@ -1430,6 +1430,7 @@
+ extern int tnl_toggle;
+ extern int sqm_toggle;
+ extern int qos_dpi_toggle;
++extern bool qos_ack_prio;
+ extern bool (*mtk_crypto_offloadable)(struct sk_buff *skb);
+ extern int hnat_bind_crypto_entry(struct sk_buff *skb,
+ 				  const struct net_device *dev,
+diff --git a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+--- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
++++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
+@@ -1409,7 +1409,7 @@
+ 		return HNAT_DPI_P2P;
+ 
+ 	if (l4_proto == IPPROTO_TCP) {
+-		if (per_pkt && tcp_ctrl_ack)
++		if (per_pkt && tcp_ctrl_ack && READ_ONCE(qos_ack_prio))
+ 			return HNAT_DPI_REALTIME;
+ 		if (sport_h == 53 || dport_h == 53 ||
+ 		    sport_h == 22 || dport_h == 22)

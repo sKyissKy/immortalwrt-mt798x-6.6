@@ -69,6 +69,7 @@ class FakeSysEnv:
             "qos_toggle": "0\n",
             "sqm_toggle": "enabled=0 dpi=1 ul_eqos=1..15 ul_sqm=16..31 dl_eqos=33..47 dl_sqm=48..63 qos_toggle=0 ul=0 dl=0\n",
             "qos_dpi": "enabled=1 realtime_pkts=10 fair_pkts=20 video_pkts=5 p2p_pkts=2 eqos_flows=1\n",
+            "qos_ack_prio": "1\n",
             "hnat_setting": "11 30\n",
             "all_entry": "state=BIND\nstate=BIND\nstate=UNBIND\n",
         }.items():
@@ -318,6 +319,7 @@ class MtkQosTests(unittest.TestCase):
     def test_4_hook_toggle_0_cake_fallback(self):
         with tempfile.TemporaryDirectory() as td:
             env = FakeSysEnv(Path(td))
+            env.uci_kv["mtk_qos.global.ack_prio"] = "0"
             (env.hnat_dir / "hook_toggle").write_text("disabled\n")
             env.routes = "default via 10.18.64.110 dev wwan0_1 metric 12\n"
             res = env.run("start")
@@ -327,10 +329,12 @@ class MtkQosTests(unittest.TestCase):
             self.assertIn("qdisc replace dev ifb4mtkqos root cake", tc_log)
             j = json.loads(env.run("json").stdout)
             self.assertEqual(j["mode"], "cake_fallback")
+            self.assertEqual((env.hnat_dir / "qos_ack_prio").read_text().strip(), "1")
 
     def test_5_stop_full_cleanup_and_rollback(self):
         with tempfile.TemporaryDirectory() as td:
             env = FakeSysEnv(Path(td))
+            env.uci_kv["mtk_qos.global.ack_prio"] = "0"
             env.uci_kv.update({
                 "mtk_qos.dev1.enabled": "1",
                 "mtk_qos.dev1.ip": "192.168.59.50",
@@ -343,6 +347,7 @@ class MtkQosTests(unittest.TestCase):
             self.assertEqual((env.hnat_dir / "sqm_toggle").read_text().strip(), "0")
             self.assertEqual((env.hnat_dir / "qos_toggle").read_text().strip(), "0")
             self.assertEqual((env.hnat_dir / "hnat_setting").read_text().strip(), "11 30")
+            self.assertEqual((env.hnat_dir / "qos_ack_prio").read_text().strip(), "1")
             self.assertEqual((env.qdma_dir / "qdma_sch2").read_text().strip(), "0 wrr 1000000")
             self.assertEqual((env.pce_dir / "cls_entry").read_text().strip(), "31")
             nft_log = (env.logs / "nft.log").read_text()
@@ -426,6 +431,28 @@ class MtkQosTests(unittest.TestCase):
             status = json.loads(env.run("json").stdout)
             self.assertEqual(status["active"], 1)
             self.assertEqual(status["last_apply"], "failed")
+
+    def test_ack_priority_setting_is_binary_and_optional(self):
+        for value in ("0", "1"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as td:
+                env = FakeSysEnv(Path(td))
+                env.uci_kv["mtk_qos.global.ack_prio"] = value
+                res = env.run("start")
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertEqual((env.hnat_dir / "qos_ack_prio").read_text().strip(), value)
+
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            (env.hnat_dir / "qos_ack_prio").unlink()
+            res = env.run("start")
+            self.assertEqual(res.returncode, 0, res.stderr)
+
+        with tempfile.TemporaryDirectory() as td:
+            env = FakeSysEnv(Path(td))
+            env.uci_kv["mtk_qos.global.ack_prio"] = "2"
+            res = env.run("start")
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("invalid ack_prio", res.stderr)
 
 
 if __name__ == "__main__":
