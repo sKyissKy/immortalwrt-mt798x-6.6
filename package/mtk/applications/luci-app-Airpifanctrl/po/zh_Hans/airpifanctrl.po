@@ -23,6 +23,9 @@ msgstr "CPU 温度传感器 (thermal_zone0)"
 msgid "Configuration has been applied."
 msgstr "配置已成功应用。"
 
+msgid "Configuration was applied, but status refresh failed: %s"
+msgstr "配置已应用，但刷新状态失败：%s"
+
 msgid "Configure cooling fan operating mode and temperature sensor source."
 msgstr "配置散热风扇运行模式与温控传感器来源。"
 
@@ -40,6 +43,9 @@ msgstr "风扇控制"
 
 msgid "Fan Speed"
 msgstr "风扇转速"
+
+msgid "Fan status refresh failed: %s"
+msgstr "刷新风扇状态失败：%s"
 
 msgid "Low Speed Mode"
 msgstr "低速模式"

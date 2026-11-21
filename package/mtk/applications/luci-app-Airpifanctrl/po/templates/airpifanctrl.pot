@@ -16,6 +16,9 @@ msgstr ""
 msgid "Configuration has been applied."
 msgstr ""
 
+msgid "Configuration was applied, but status refresh failed: %s"
+msgstr ""
+
 msgid "Configure cooling fan operating mode and temperature sensor source."
 msgstr ""
 
@@ -32,6 +35,9 @@ msgid "Fan Control"
 msgstr ""
 
 msgid "Fan Speed"
+msgstr ""
+
+msgid "Fan status refresh failed: %s"
 msgstr ""
 
 msgid "Low Speed Mode"

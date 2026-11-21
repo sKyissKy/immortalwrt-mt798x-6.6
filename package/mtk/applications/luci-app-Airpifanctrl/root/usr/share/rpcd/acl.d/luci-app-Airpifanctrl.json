@@ -12,7 +12,8 @@
 			"ubus": {
 				"luci.airpifanctrl": [
 					"setMode",
-					"setTempSource"
+					"setTempSource",
+					"applyConfig"
 				]
 			}
 		}

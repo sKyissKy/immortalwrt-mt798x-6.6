@@ -14,17 +14,10 @@ var callGetStatus = rpc.declare({
 	expect: { '': {} }
 });
 
-var callSetMode = rpc.declare({
+var callApplyConfig = rpc.declare({
 	object: 'luci.airpifanctrl',
-	method: 'setMode',
-	params: [ 'mode', 'pwm' ],
-	expect: { '': {} }
-});
-
-var callSetTempSource = rpc.declare({
-	object: 'luci.airpifanctrl',
-	method: 'setTempSource',
-	params: [ 'source' ],
+	method: 'applyConfig',
+	params: [ 'mode', 'pwm', 'source' ],
 	expect: { '': {} }
 });
 
@@ -86,6 +79,28 @@ function showBanner(title, children, timeoutMs, ...classes) {
 	return msg;
 }
 
+var activeView = null;
+var pollGeneration = 0;
+
+function pollFanStatus() {
+	var viewSelf = activeView;
+	var generation = pollGeneration;
+	if (!viewSelf || viewSelf.applyInProgress)
+		return Promise.resolve();
+
+	return callGetStatus().then(function(res) {
+		if (!res || res.code !== 0)
+			throw new Error((res && res.error) ? res.error : 'Invalid status response');
+		if (activeView !== viewSelf || viewSelf.applyInProgress || generation !== pollGeneration)
+			return;
+
+		updateStatusDOM(res);
+
+		if (res.lucimsg)
+			showBanner(null, E('p', _(res.lucimsg)), 3500, 'info');
+	});
+}
+
 return view.extend({
 	load: function() {
 		return callGetStatus();
@@ -93,6 +108,7 @@ return view.extend({
 
 	render: function(status) {
 		status = status || {};
+		activeView = this;
 		this.initialStatus = status;
 
 		this.formData = {
@@ -139,17 +155,7 @@ return view.extend({
 			if (status.lucimsg)
 				showBanner(null, E('p', _(status.lucimsg)), 3500, 'info');
 
-			poll.add(function() {
-				return callGetStatus().then(function(res) {
-					if (!res)
-						return;
-
-					updateStatusDOM(res);
-
-					if (res.lucimsg)
-						showBanner(null, E('p', _(res.lucimsg)), 3500, 'info');
-				});
-			}, 5);
+			poll.add(pollFanStatus, 5);
 
 			return E('fieldset', { 'class': 'cbi-section' }, [
 				E('legend', {}, _('Realtime Status')),
@@ -187,7 +193,17 @@ return view.extend({
 
 	handleSaveApply: function(ev, mode) {
 		var viewSelf = this;
-		return this.map.save(null, true).then(function() {
+		if (viewSelf.applyInProgress)
+			return Promise.resolve();
+
+		viewSelf.applyInProgress = true;
+		pollGeneration++;
+		poll.remove(pollFanStatus);
+		var shouldApply = false;
+
+		return Promise.resolve().then(function() {
+			return viewSelf.map.save(null, true);
+		}).then(function() {
 			var cfg = (viewSelf.formData && viewSelf.formData.cooling_control)
 				? viewSelf.formData.cooling_control : {};
 			var targetMode = cfg.mode || 'smart';
@@ -199,37 +215,37 @@ return view.extend({
 			var initialPwm = parseInt(init.stepless_pwm != null ? init.stepless_pwm : 192, 10);
 			var initialSource = init.temp_source || 'cpu';
 			var needsInit = (init.uninitialized === true);
+			shouldApply = needsInit || targetSource !== initialSource ||
+				targetMode !== initialMode ||
+				(targetMode === 'stepless' && targetPwm !== initialPwm);
 
-			var tasks = Promise.resolve();
+			if (!shouldApply)
+				return;
 
-			if (needsInit || targetSource !== initialSource) {
-				tasks = tasks.then(function() {
-					return callSetTempSource(targetSource).then(function(res) {
-						if (!res || res.code !== 0)
-							throw new Error((res && res.error) ? res.error : 'RPC error');
-					});
-				});
-			}
+			var pwmArg = (targetMode === 'stepless') ? targetPwm : undefined;
+			return callApplyConfig(targetMode, pwmArg, targetSource).then(function(res) {
+				if (!res || res.code !== 0)
+					throw new Error((res && res.error) ? res.error : 'RPC error');
+			});
+		}).then(function() {
+			return callGetStatus().then(function(newStatus) {
+				if (!newStatus || newStatus.code !== 0)
+					throw new Error((newStatus && newStatus.error) ? newStatus.error : 'RPC error');
 
-			if (needsInit || targetMode !== initialMode || (targetMode === 'stepless' && targetPwm !== initialPwm)) {
-				var pwmArg = (targetMode === 'stepless') ? targetPwm : undefined;
-				tasks = tasks.then(function() {
-					return callSetMode(targetMode, pwmArg).then(function(res) {
-						if (!res || res.code !== 0)
-							throw new Error((res && res.error) ? res.error : 'RPC error');
-					});
-				});
-			}
-
-			return tasks.then(function() {
-				return callGetStatus().then(function(newStatus) {
-					viewSelf.initialStatus = newStatus || {};
-					updateStatusDOM(newStatus);
-					showBanner(null, E('p', _('Configuration has been applied.')), 3500, 'info');
-				});
+				viewSelf.initialStatus = newStatus;
+				updateStatusDOM(newStatus);
+				showBanner(null, E('p', _('Configuration has been applied.')), 3500, 'info');
+			}).catch(function(err) {
+				var msg = shouldApply
+					? _('Configuration was applied, but status refresh failed: %s').format(err.message || err)
+					: _('Fan status refresh failed: %s').format(err.message || err);
+				showBanner(null, E('p', msg), 0, 'error');
 			});
 		}).catch(function(err) {
 			showBanner(null, E('p', _('Failed to apply configuration: %s').format(err.message || err)), 0, 'error');
+		}).then(function() {
+			viewSelf.applyInProgress = false;
+			poll.add(pollFanStatus, 5);
 		});
 	},
 

@@ -1215,77 +1215,79 @@ function complete_transaction_locked(snapshot, result) {
 	return result;
 }
 
-function apply_mode_locked(mode, pwm_arg) {
+function write_temp_source_locked(source) {
+	let target_val = (source == 'modem') ? 'modem' : 'cpu';
+	let fansv_label = (source == 'modem') ? '5G Modem Temperature' : 'CPU Temperature';
+
+	if (!write_atomic_verified('/etc/fanvallv.conf', `${target_val}\n`))
+		return { code: 1, error: 'Failed to write temperature source config' };
+
+	return { code: 0, source: target_val, fansv: fansv_label };
+}
+
+function rollback_policy_transaction_locked(snapshot, err_msg) {
+	let rec_ok = restore_snapshot_locked(snapshot);
+	if (rec_ok) {
+		if (!unlink_verified(JOURNAL_PATH))
+			recovery_failed_locked('journal_clear_failed');
+	}
+	else if (!match(readfile_trim('/var/run/cooling_control.error') || '', /^journal_recovery_failed/))
+		recovery_failed_locked('rollback_failed');
+
+	return { code: 1, error: err_msg };
+}
+
+function apply_mode_state_locked(mode, pwm_arg, source_arg) {
 	let entry = MODE_TABLE[mode];
 	let target_pwm = (mode == 'stepless') ? pwm_arg : entry.pwm;
-
-	let snapshot = capture_snapshot_locked();
-	if (!snapshot) {
-		return {
-			code: 1,
-			error: 'Failed to query procd service instance state'
-		};
-	}
-	if (!write_atomic_verified(JOURNAL_PATH, sprintf('%J\n', snapshot))) {
-		return {
-			code: 1,
-			error: 'Failed to initialize transaction journal'
-		};
-	}
-
-	let rollback_transaction = function(err_msg) {
-		let rec_ok = restore_snapshot_locked(snapshot);
-		if (rec_ok) {
-			if (!unlink_verified(JOURNAL_PATH))
-				recovery_failed_locked('journal_clear_failed');
-		}
-		else if (!match(readfile_trim('/var/run/cooling_control.error') || '', /^journal_recovery_failed/))
-			recovery_failed_locked('rollback_failed');
-		return { code: 1, error: err_msg };
-	};
-
 	let pwm_node = find_pwm();
 	let tm_path = rpath('/sys/class/thermal/thermal_zone0/mode');
 	let tm_ok = fs.access(tm_path, 'r') && fs.access(tm_path, 'w');
 	let cpu_temp = parse_cpu_temp();
 	if (!pwm_node || !tm_ok || cpu_temp <= 0)
-		return rollback_transaction('Hardware or thermal sensor validation failed');
+		return { code: 1, error: 'Hardware or thermal sensor validation failed' };
 
 	if (!stop_worker_locked()) {
 		recovery_failed_locked('worker_stop_timeout');
-		return { code: 1, error: 'Failed to stop existing fancts worker' };
+		return { code: 1, error: 'Failed to stop existing fancts worker', no_rollback: true };
+	}
+
+	if (source_arg != null) {
+		let source_result = write_temp_source_locked(source_arg);
+		if (source_result.code != 0)
+			return source_result;
 	}
 
 	if (mode == 'smart') {
 		if (!write_atomic_verified('/etc/fanvall', '9\n'))
-			return rollback_transaction('Failed to write /etc/fanvall');
+			return { code: 1, error: 'Failed to write /etc/fanvall' };
 		unlink_safe('/tmp/wpsbt.conf');
 		unlink_safe('/var/run/cooling_control.ready');
 		unlink_safe(OWNER_PATH);
 
 		let gen = new_generation('smart');
 		if (!start_smart_locked(gen))
-			return rollback_transaction('Failed to register smart fan control service with procd');
+			return { code: 1, error: 'Failed to register smart fan control service with procd' };
 
 		let st = wait_ready_locked(gen, pwm_node);
 		if (!st.ready)
-			return rollback_transaction('Smart fan control worker failed readiness verification');
+			return { code: 1, error: 'Smart fan control worker failed readiness verification' };
 
-		return complete_transaction_locked(snapshot, {
+		return {
 			code: 0,
 			mode: 'smart',
 			fanvall: 9,
 			fancts: entry.fancts,
 			pwm1: st.pwm1,
 			fanspd: pwm_to_percent(st.pwm1)
-		});
+		};
 	}
 
 	let mres = apply_manual_locked(mode, target_pwm);
 	if (!mres.ok)
-		return rollback_transaction(mres.error);
+		return { code: 1, error: mres.error };
 
-	return complete_transaction_locked(snapshot, {
+	return {
 		code: 0,
 		mode: mode,
 		fanvall: entry.fanvall,
@@ -1293,46 +1295,68 @@ function apply_mode_locked(mode, pwm_arg) {
 		pwm1: target_pwm,
 		stepless_pwm: target_pwm,
 		fanspd: pwm_to_percent(target_pwm)
-	});
+	};
+}
+
+function apply_policy_transaction_locked(mode, pwm_arg, source, force_mode) {
+	let current_mode_raw = readfile_trim('/etc/fanvall');
+	let current_pwm = clamp_pwm(readfile_trim('/usr/bin/fanspeed.conf'), 192);
+	let current_source = readfile_trim('/etc/fanvallv.conf') || '';
+	let mode_uninitialized = !fs.access(rpath('/etc/fanvall')) ||
+				 !fs.access(rpath('/var/run/cooling_control.ready'));
+	let mode_changed = (mode != null) &&
+		(force_mode || mode_uninitialized || decode_fanvall(current_mode_raw).mode != mode ||
+		 (mode == 'stepless' && current_pwm != pwm_arg));
+	let source_changed = (source != null) && (current_source != source);
+	let fansv_label = (source == 'modem') ? '5G Modem Temperature' : 'CPU Temperature';
+
+	if (!mode_changed && !source_changed) {
+		let unchanged = { code: 0, mode: mode, source: source };
+		if (source != null)
+			unchanged.fansv = fansv_label;
+		return unchanged;
+	}
+
+	let snapshot = capture_snapshot_locked();
+	if (!snapshot)
+		return { code: 1, error: 'Failed to query procd service instance state' };
+	if (!write_atomic_verified(JOURNAL_PATH, sprintf('%J\n', snapshot)))
+		return { code: 1, error: 'Failed to initialize transaction journal' };
+
+	let result;
+	if (mode_changed) {
+		result = apply_mode_state_locked(mode, pwm_arg, source_changed ? source : null);
+	}
+	else {
+		result = write_temp_source_locked(source);
+	}
+
+	if (result.code != 0) {
+		if (result.no_rollback) {
+			delete result.no_rollback;
+			return result;
+		}
+		return rollback_policy_transaction_locked(snapshot, result.error);
+	}
+
+	if (source != null) {
+		result.source = source;
+		result.fansv = fansv_label;
+	}
+
+	return complete_transaction_locked(snapshot, result);
+}
+
+function apply_mode_locked(mode, pwm_arg) {
+	return apply_policy_transaction_locked(mode, pwm_arg, null, true);
 }
 
 function apply_temp_source_locked(source) {
-	let snapshot = capture_snapshot_locked();
-	if (!snapshot) {
-		return {
-			code: 1,
-			error: 'Failed to query procd service instance state'
-		};
-	}
-	if (!write_atomic_verified(JOURNAL_PATH, sprintf('%J\n', snapshot))) {
-		return {
-			code: 1,
-			error: 'Failed to initialize transaction journal'
-		};
-	}
+	return apply_policy_transaction_locked(null, null, source, false);
+}
 
-	let target_val = (source == 'modem') ? 'modem' : 'cpu';
-	let fansv_label = (source == 'modem') ? '5G Modem Temperature' : 'CPU Temperature';
-
-	if (!write_atomic_verified('/etc/fanvallv.conf', `${target_val}\n`)) {
-		let rec_ok = restore_snapshot_locked(snapshot);
-		if (rec_ok) {
-			if (!unlink_verified(JOURNAL_PATH))
-				recovery_failed_locked('journal_clear_failed');
-		}
-		else if (!match(readfile_trim('/var/run/cooling_control.error') || '', /^journal_recovery_failed/))
-			recovery_failed_locked('rollback_failed');
-		return {
-			code: 1,
-			error: 'Failed to write temperature source config'
-		};
-	}
-
-	return complete_transaction_locked(snapshot, {
-		code: 0,
-		source: source,
-		fansv: fansv_label
-	});
+function apply_config_locked(mode, pwm_arg, source) {
+	return apply_policy_transaction_locked(mode, pwm_arg, source, false);
 }
 
 function sync_wps_button_script_locked() {
@@ -1534,6 +1558,8 @@ function run_control_locked(action) {
 		return apply_mode_locked(action.mode, action.pwm);
 	if (action.type == 'setTempSource')
 		return apply_temp_source_locked(action.source);
+	if (action.type == 'applyConfig')
+		return apply_config_locked(action.mode, action.pwm, action.source);
 
 	return { code: 1, error: 'Unsupported control action' };
 }
@@ -1652,6 +1678,54 @@ const methods = {
 
 			print(sprintf('%J\n', control({
 				type: 'setTempSource',
+				source: source
+			})));
+		}
+	},
+
+	applyConfig: {
+		args: { mode: 'str', pwm: 0, source: 'str' },
+		call: function(args) {
+			let mode = args ? args.mode : null;
+			let source = args ? args.source : null;
+
+			if (type(mode) != 'string' || !(mode in MODE_TABLE)) {
+				print(sprintf('%J\n', {
+					code: 1,
+					error: 'Invalid mode: must be stop, low, normal, turbo, smart, or stepless'
+				}));
+				return;
+			}
+
+			if (args.pwm != null) {
+				if (type(args.pwm) != 'int' || args.pwm < 0 || args.pwm > 255) {
+					print(sprintf('%J\n', {
+						code: 1,
+						error: 'Invalid pwm: must be an integer in [0, 255]'
+					}));
+					return;
+				}
+			}
+			else if (mode == 'stepless') {
+				print(sprintf('%J\n', {
+					code: 1,
+					error: 'Missing pwm integer in [0, 255] for stepless mode'
+					}));
+				return;
+			}
+
+			if (type(source) != 'string' || (source != 'cpu' && source != 'modem')) {
+				print(sprintf('%J\n', {
+					code: 1,
+					error: 'Invalid source: must be cpu or modem'
+				}));
+				return;
+			}
+
+			print(sprintf('%J\n', control({
+				type: 'applyConfig',
+				mode: mode,
+				pwm: args.pwm,
 				source: source
 			})));
 		}
