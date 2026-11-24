@@ -1,0 +1,648 @@
+From: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+Subject: [PATCH] usb: net: cdc_ncm: add switchable RX header-split thresh and TX SG zero-copy NTB
+
+Expose runtime-tunable rx_frag_thresh (default 2048; min 144, 0 disables)
+in cdc_ncm_rx_fixup() so header-split zero-copy RX can be tuned for
+standard 1514-byte MT5700/MH5000 downlink frames while satisfying
+MTK HNAT ext-to-ge linearization bounds.
+
+Add opt-in TX zero-copy frag_list SG NTB assembly gated by module
+parameter tx_sg_zerocopy (default 0) and dev->can_dma_sg on non-MBIM
+SuperSpeed/no-SG-constraint links, using a module-owned zero page for
+NCM alignment and short/full-NTB padding plus bounded <=64 SG segments
+matching usbnet build_dma_sg(). Export tx_sg_ntbs via ethtool stats.
+
+Signed-off-by: sKyissKy <29267720+sKyissKy@users.noreply.github.com>
+---
+--- a/include/linux/usb/cdc_ncm.h	2026-11-23 13:04:19.357863813 +0800
++++ b/include/linux/usb/cdc_ncm.h	2026-11-23 13:04:19.477949753 +0800
+@@ -151,6 +151,10 @@ struct cdc_ncm_ctx {
+ 	u64 tx_ntbs;
+ 	u64 rx_overhead;
+ 	u64 rx_ntbs;
++	u64 tx_sg_ntbs;
++	struct sk_buff *tx_sg_tail;
++	u16 tx_sg_cnt;
++	u8 tx_curr_sg;
+ };
+ 
+ u8 cdc_ncm_select_altsetting(struct usb_interface *intf);
+--- a/drivers/net/usb/cdc_ncm.c	2026-11-23 13:04:19.466732867 +0800
++++ b/drivers/net/usb/cdc_ncm.c	2026-11-23 13:04:19.478813128 +0800
+@@ -62,6 +62,18 @@ static bool prefer_mbim;
+ module_param(prefer_mbim, bool, 0644);
+ MODULE_PARM_DESC(prefer_mbim, "Prefer MBIM setting on dual NCM/MBIM functions");
+ 
++static uint __read_mostly rx_frag_thresh = 2048;
++module_param(rx_frag_thresh, uint, 0644);
++MODULE_PARM_DESC(rx_frag_thresh,
++		 "Minimum packet length for NCM RX page-frag header split (default 2048; min 144, 0=off)");
++
++static bool __read_mostly tx_sg_zerocopy;
++module_param(tx_sg_zerocopy, bool, 0644);
++MODULE_PARM_DESC(tx_sg_zerocopy,
++		 "Enable experimental zero-copy frag_list SG NTB aggregation on TX (default 0)");
++
++static struct page *cdc_ncm_zero_page;
++
+ static void cdc_ncm_txpath_bh(struct tasklet_struct *t);
+ static void cdc_ncm_tx_timeout_start(struct cdc_ncm_ctx *ctx);
+ static enum hrtimer_restart cdc_ncm_tx_timer_cb(struct hrtimer *hr_timer);
+@@ -88,9 +100,12 @@ static const struct cdc_ncm_stats cdc_nc
+ 	CDC_NCM_SIMPLE_STAT(tx_ntbs),
+ 	CDC_NCM_SIMPLE_STAT(rx_overhead),
+ 	CDC_NCM_SIMPLE_STAT(rx_ntbs),
++	CDC_NCM_SIMPLE_STAT(tx_sg_ntbs),
+ };
+ 
+ #define CDC_NCM_LOW_MEM_MAX_CNT 10
++#define CDC_NCM_SG_TX_MAX 64
++#define CDC_NCM_SG_HEAD_ALLOC 1024U
+ 
+ static int cdc_ncm_get_sset_count(struct net_device __always_unused *netdev, int sset)
+ {
+@@ -456,6 +471,9 @@ static void cdc_ncm_update_rxtx_max(stru
+ 		if (ctx->tx_curr_skb) {
+ 			dev_kfree_skb_any(ctx->tx_curr_skb);
+ 			ctx->tx_curr_skb = NULL;
++			ctx->tx_sg_tail = NULL;
++			ctx->tx_sg_cnt = 0;
++			ctx->tx_curr_sg = 0;
+ 		}
+ 		ctx->tx_max = val;
+ 		netif_tx_unlock_bh(dev->net);
+@@ -792,6 +810,9 @@ static void cdc_ncm_free(struct cdc_ncm_
+ 		dev_kfree_skb_any(ctx->tx_curr_skb);
+ 		ctx->tx_curr_skb = NULL;
+ 	}
++	ctx->tx_sg_tail = NULL;
++	ctx->tx_sg_cnt = 0;
++	ctx->tx_curr_sg = 0;
+ 
+ 	if (ctx->is_ndp16)
+ 		kfree(ctx->delayed_ndp16);
+@@ -990,6 +1011,8 @@ int cdc_ncm_bind_common(struct usbnet *d
+ 	if (!cdc_ncm_comm_intf_is_mbim(ctx->control->cur_altsetting)) {
+ 		dev->net->features |= NETIF_F_SG;
+ 		dev->net->hw_features |= NETIF_F_SG;
++		if (usb_device_no_sg_constraint(dev->udev))
++			dev->can_dma_sg = 1;
+ 	}
+ 	return 0;
+ 
+@@ -1132,8 +1155,12 @@ static struct usb_cdc_ncm_ndp16 *cdc_ncm
+ 	}
+ 
+ 	/* align new NDP */
+-	if (!(ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END))
+-		cdc_ncm_align_tail(skb, ctx->tx_ndp_modulus, 0, ctx->tx_curr_size);
++	if (!(ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END)) {
++		if (skb_is_nonlinear(skb))
++			return NULL;
++		cdc_ncm_align_tail(skb, ctx->tx_ndp_modulus, 0,
++				   ctx->tx_curr_size);
++	}
+ 
+ 	/* verify that there is room for the NDP and the datagram (reserve) */
+ 	if ((ctx->tx_curr_size - skb->len - reserve) < ctx->max_ndp_size)
+@@ -1187,8 +1214,12 @@ static struct usb_cdc_ncm_ndp32 *cdc_ncm
+ 	}
+ 
+ 	/* align new NDP */
+-	if (!(ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END))
+-		cdc_ncm_align_tail(skb, ctx->tx_ndp_modulus, 0, ctx->tx_curr_size);
++	if (!(ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END)) {
++		if (skb_is_nonlinear(skb))
++			return NULL;
++		cdc_ncm_align_tail(skb, ctx->tx_ndp_modulus, 0,
++				   ctx->tx_curr_size);
++	}
+ 
+ 	/* verify that there is room for the NDP and the datagram (reserve) */
+ 	if ((ctx->tx_curr_size - skb->len - reserve) < ctx->max_ndp_size)
+@@ -1211,6 +1242,468 @@ static struct usb_cdc_ncm_ndp32 *cdc_ncm
+ 	return ndp32;
+ }
+ 
++static size_t cdc_ncm_calc_align(size_t len, size_t modulus, size_t remainder)
++{
++	return (modulus - ((len - remainder) & (modulus - 1))) & (modulus - 1);
++}
++
++static unsigned int cdc_ncm_skb_sgs(const struct sk_buff *skb)
++{
++	unsigned int count = skb_headlen(skb) ? 1 : 0;
++	int i;
++
++	for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
++		if (skb_frag_size(&skb_shinfo(skb)->frags[i]))
++			count++;
++	}
++
++	return count;
++}
++
++static unsigned int cdc_ncm_zero_sgs_needed(const struct cdc_ncm_ctx *ctx,
++					    const struct sk_buff *skb_out,
++					    size_t len)
++{
++	struct sk_buff *prev = ctx->tx_sg_tail;
++
++	if (!len)
++		return 0;
++
++	if (!prev && !skb_is_nonlinear(skb_out) &&
++	    skb_tailroom(skb_out) >= len)
++		return 0;
++
++	if (prev && !skb_cloned(prev) && !skb_shared(prev) &&
++	    !skb_is_nonlinear(prev) && skb_tailroom(prev) >= len)
++		return 0;
++
++	return DIV_ROUND_UP(len, PAGE_SIZE);
++}
++
++static void cdc_ncm_sg_chain_skb(struct cdc_ncm_ctx *ctx,
++				 struct sk_buff *skb_out,
++				 struct sk_buff *child, unsigned int child_sgs)
++{
++	child->next = NULL;
++	if (!ctx->tx_sg_tail)
++		skb_shinfo(skb_out)->frag_list = child;
++	else
++		ctx->tx_sg_tail->next = child;
++	ctx->tx_sg_tail = child;
++	skb_out->len += child->len;
++	skb_out->data_len += child->len;
++	skb_out->truesize += child->truesize;
++	ctx->tx_sg_cnt += child_sgs;
++}
++
++static void cdc_ncm_sg_reset(struct cdc_ncm_ctx *ctx)
++{
++	ctx->tx_curr_skb = NULL;
++	ctx->tx_sg_tail = NULL;
++	ctx->tx_sg_cnt = 0;
++	ctx->tx_curr_sg = 0;
++}
++
++static void cdc_ncm_sg_clear_delayed_ndp(struct cdc_ncm_ctx *ctx)
++{
++	if (!(ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END))
++		return;
++
++	if (ctx->is_ndp16 && ctx->delayed_ndp16)
++		memset(ctx->delayed_ndp16, 0, ctx->max_ndp_size);
++	else if (!ctx->is_ndp16 && ctx->delayed_ndp32)
++		memset(ctx->delayed_ndp32, 0, ctx->max_ndp_size);
++}
++
++static int cdc_ncm_sg_append_zero(struct cdc_ncm_ctx *ctx,
++				  struct sk_buff *skb_out, size_t len)
++{
++	struct sk_buff *prev = ctx->tx_sg_tail;
++
++	if (!len)
++		return 0;
++
++	if (!prev && !skb_is_nonlinear(skb_out) &&
++	    skb_tailroom(skb_out) >= len) {
++		skb_put_zero(skb_out, len);
++		return 0;
++	}
++
++	if (prev && !skb_cloned(prev) && !skb_shared(prev)) {
++		if (!skb_is_nonlinear(prev) && skb_tailroom(prev) >= len) {
++			skb_put_zero(prev, len);
++			skb_out->len += len;
++			skb_out->data_len += len;
++			return 0;
++		}
++		while (len && skb_shinfo(prev)->nr_frags < MAX_SKB_FRAGS &&
++		       ctx->tx_sg_cnt < CDC_NCM_SG_TX_MAX) {
++			size_t chunk = min_t(size_t, len, PAGE_SIZE);
++			int fidx = skb_shinfo(prev)->nr_frags;
++
++			get_page(cdc_ncm_zero_page);
++			skb_fill_page_desc(prev, fidx, cdc_ncm_zero_page, 0,
++					   chunk);
++			prev->len += chunk;
++			prev->data_len += chunk;
++			skb_out->len += chunk;
++			skb_out->data_len += chunk;
++			ctx->tx_sg_cnt++;
++			len -= chunk;
++		}
++	}
++
++	while (len) {
++		struct sk_buff *pad_skb;
++		unsigned int frags = 0;
++
++		pad_skb = alloc_skb(0, GFP_ATOMIC);
++		if (!pad_skb)
++			return -ENOMEM;
++
++		while (len && frags < MAX_SKB_FRAGS) {
++			size_t chunk = min_t(size_t, len, PAGE_SIZE);
++
++			get_page(cdc_ncm_zero_page);
++			skb_fill_page_desc(pad_skb, frags++, cdc_ncm_zero_page,
++					   0, chunk);
++			pad_skb->len += chunk;
++			pad_skb->data_len += chunk;
++			len -= chunk;
++		}
++		cdc_ncm_sg_chain_skb(ctx, skb_out, pad_skb, frags);
++	}
++
++	return 0;
++}
++
++static struct sk_buff *
++cdc_ncm_fill_tx_frame_sg(struct usbnet *dev, struct sk_buff *skb, __le32 sign)
++{
++	struct cdc_ncm_ctx *ctx = (struct cdc_ncm_ctx *)dev->data[0];
++	union {
++		struct usb_cdc_ncm_nth16 *nth16;
++		struct usb_cdc_ncm_nth32 *nth32;
++	} nth;
++	union {
++		struct usb_cdc_ncm_ndp16 *ndp16;
++		struct usb_cdc_ncm_ndp32 *ndp32;
++	} ndp;
++	struct sk_buff *skb_out, *tail_skb;
++	u16 n = 0, index, ndplen;
++	u8 ready2send = 0;
++	u32 delayed_ndp_size, tail_sgs, ndp_align = 0;
++	size_t full_pad = 0, short_pad = 0, total_after_ndp;
++
++	if (!skb && !ctx->tx_curr_skb && !ctx->tx_rem_skb)
++		return NULL;
++
++	if (ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END) {
++		delayed_ndp_size = ctx->max_ndp_size +
++			max_t(u32, ctx->tx_ndp_modulus,
++			      ctx->tx_modulus + ctx->tx_remainder) - 1;
++		tail_sgs = 2;
++	} else {
++		delayed_ndp_size = 0;
++		tail_sgs = 1;
++	}
++
++	if (skb) {
++		swap(skb, ctx->tx_rem_skb);
++		swap(sign, ctx->tx_rem_sign);
++	} else {
++		ready2send = 1;
++	}
++
++	skb_out = ctx->tx_curr_skb;
++	if (!skb_out) {
++		u32 head_sz = min_t(u32, ctx->tx_max, CDC_NCM_SG_HEAD_ALLOC);
++
++		ctx->tx_curr_size = ctx->tx_max;
++		skb_out = alloc_skb(head_sz, GFP_ATOMIC);
++		if (!skb_out)
++			goto alloc_failed;
++
++		if (ctx->is_ndp16) {
++			nth.nth16 = skb_put_zero(skb_out, sizeof(*nth.nth16));
++			nth.nth16->dwSignature =
++				cpu_to_le32(USB_CDC_NCM_NTH16_SIGN);
++			nth.nth16->wHeaderLength =
++				cpu_to_le16(sizeof(*nth.nth16));
++			nth.nth16->wSequence = cpu_to_le16(ctx->tx_seq++);
++		} else {
++			nth.nth32 = skb_put_zero(skb_out, sizeof(*nth.nth32));
++			nth.nth32->dwSignature =
++				cpu_to_le32(USB_CDC_NCM_NTH32_SIGN);
++			nth.nth32->wHeaderLength =
++				cpu_to_le16(sizeof(*nth.nth32));
++			nth.nth32->wSequence = cpu_to_le16(ctx->tx_seq++);
++		}
++
++		ctx->tx_curr_frame_num = 0;
++		ctx->tx_curr_frame_payload = 0;
++		ctx->tx_sg_tail = NULL;
++		ctx->tx_sg_cnt = 1;
++		ctx->tx_curr_sg = 1;
++	}
++
++	for (n = ctx->tx_curr_frame_num; n < ctx->tx_max_datagrams; n++) {
++		unsigned int pkt_sgs, pad_sgs;
++		size_t align;
++
++		if (!skb) {
++			skb = ctx->tx_rem_skb;
++			sign = ctx->tx_rem_sign;
++			ctx->tx_rem_skb = NULL;
++			if (!skb)
++				break;
++		}
++
++		skb = skb_share_check(skb, GFP_ATOMIC);
++		if (!skb) {
++			dev->net->stats.tx_dropped++;
++			continue;
++		}
++		if (skb_has_frag_list(skb) && skb_linearize(skb)) {
++			dev_kfree_skb_any(skb);
++			skb = NULL;
++			dev->net->stats.tx_dropped++;
++			continue;
++		}
++
++		pkt_sgs = cdc_ncm_skb_sgs(skb);
++		if (n == 0 &&
++		    (!pkt_sgs ||
++		     ctx->tx_sg_cnt + pkt_sgs + tail_sgs + 1 >
++		     CDC_NCM_SG_TX_MAX)) {
++			if (skb_linearize(skb)) {
++				dev_kfree_skb_any(skb);
++				skb = NULL;
++				dev->net->stats.tx_dropped++;
++				continue;
++			}
++			pkt_sgs = cdc_ncm_skb_sgs(skb);
++		}
++
++		if (ctx->is_ndp16)
++			ndp.ndp16 = cdc_ncm_ndp16(ctx, skb_out, sign,
++						  skb->len + ctx->tx_modulus +
++						  ctx->tx_remainder);
++		else
++			ndp.ndp32 = cdc_ncm_ndp32(ctx, skb_out, sign,
++						  skb->len + ctx->tx_modulus +
++						  ctx->tx_remainder);
++
++		align = cdc_ncm_calc_align(skb_out->len, ctx->tx_modulus,
++					   ctx->tx_remainder);
++		pad_sgs = cdc_ncm_zero_sgs_needed(ctx, skb_out, align);
++
++		if ((ctx->is_ndp16 && !ndp.ndp16) ||
++		    (!ctx->is_ndp16 && !ndp.ndp32) ||
++		    skb_out->len + align + skb->len + delayed_ndp_size >
++		    ctx->tx_curr_size ||
++		    ctx->tx_sg_cnt + pad_sgs + pkt_sgs + tail_sgs >
++		    CDC_NCM_SG_TX_MAX) {
++			if (n == 0) {
++				dev_kfree_skb_any(skb);
++				skb = NULL;
++				dev->net->stats.tx_dropped++;
++			} else {
++				if (ctx->tx_rem_skb) {
++					dev_kfree_skb_any(ctx->tx_rem_skb);
++					dev->net->stats.tx_dropped++;
++				}
++				ctx->tx_rem_skb = skb;
++				ctx->tx_rem_sign = sign;
++				skb = NULL;
++				ready2send = 1;
++				ctx->tx_reason_ntb_full++;
++			}
++			break;
++		}
++
++		if (align && cdc_ncm_sg_append_zero(ctx, skb_out, align)) {
++			if (n == 0) {
++				dev_kfree_skb_any(skb);
++				skb = NULL;
++				dev->net->stats.tx_dropped++;
++			} else {
++				if (ctx->tx_rem_skb) {
++					dev_kfree_skb_any(ctx->tx_rem_skb);
++					dev->net->stats.tx_dropped++;
++				}
++				ctx->tx_rem_skb = skb;
++				ctx->tx_rem_sign = sign;
++				skb = NULL;
++				ready2send = 1;
++			}
++			break;
++		}
++
++		if (ctx->is_ndp16) {
++			ndplen = le16_to_cpu(ndp.ndp16->wLength);
++			index = (ndplen - sizeof(struct usb_cdc_ncm_ndp16)) /
++				sizeof(struct usb_cdc_ncm_dpe16) - 1;
++
++			ndp.ndp16->dpe16[index].wDatagramLength =
++				cpu_to_le16(skb->len);
++			ndp.ndp16->dpe16[index].wDatagramIndex =
++				cpu_to_le16(skb_out->len);
++			ndp.ndp16->wLength = cpu_to_le16(ndplen +
++				sizeof(struct usb_cdc_ncm_dpe16));
++		} else {
++			ndplen = le16_to_cpu(ndp.ndp32->wLength);
++			index = (ndplen - sizeof(struct usb_cdc_ncm_ndp32)) /
++				sizeof(struct usb_cdc_ncm_dpe32) - 1;
++
++			ndp.ndp32->dpe32[index].dwDatagramLength =
++				cpu_to_le32(skb->len);
++			ndp.ndp32->dpe32[index].dwDatagramIndex =
++				cpu_to_le32(skb_out->len);
++			ndp.ndp32->wLength = cpu_to_le16(ndplen +
++				sizeof(struct usb_cdc_ncm_dpe32));
++		}
++
++		ctx->tx_curr_frame_payload += skb->len;
++		cdc_ncm_sg_chain_skb(ctx, skb_out, skb, pkt_sgs);
++		skb = NULL;
++
++		if (index >= CDC_NCM_DPT_DATAGRAMS_MAX) {
++			ready2send = 1;
++			ctx->tx_reason_ndp_full++;
++			break;
++		}
++	}
++
++	if (skb) {
++		dev_kfree_skb_any(skb);
++		skb = NULL;
++		dev->net->stats.tx_dropped++;
++	}
++
++	ctx->tx_curr_frame_num = n;
++
++	if (n == 0) {
++		ctx->tx_curr_skb = skb_out;
++		goto exit_no_skb;
++	} else if ((n < ctx->tx_max_datagrams) && (ready2send == 0) &&
++		   (ctx->timer_interval > 0)) {
++		ctx->tx_curr_skb = skb_out;
++		if (n < CDC_NCM_RESTART_TIMER_DATAGRAM_CNT)
++			ctx->tx_timer_pending = CDC_NCM_TIMER_PENDING_CNT;
++		goto exit_no_skb;
++	} else if (n == ctx->tx_max_datagrams) {
++		ctx->tx_reason_max_datagram++;
++	}
++
++	if (ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END) {
++		ndp_align = cdc_ncm_calc_align(skb_out->len,
++					       ctx->tx_ndp_modulus, 0);
++		if (skb_out->len + ndp_align + ctx->max_ndp_size >
++		    ctx->tx_curr_size)
++			ndp_align = 0;
++		total_after_ndp = skb_out->len + ndp_align + ctx->max_ndp_size;
++	} else {
++		total_after_ndp = skb_out->len;
++	}
++
++	if (!(dev->driver_info->flags & FLAG_SEND_ZLP) &&
++	    total_after_ndp > ctx->min_tx_pkt &&
++	    total_after_ndp < ctx->tx_curr_size &&
++	    (ctx->tx_curr_size - total_after_ndp) <=
++	    (size_t)(CDC_NCM_SG_TX_MAX - ctx->tx_sg_cnt - 1) * PAGE_SIZE)
++		full_pad = ctx->tx_curr_size - total_after_ndp;
++	else if (total_after_ndp < ctx->tx_curr_size && dev->maxpacket &&
++		 (total_after_ndp % dev->maxpacket) == 0)
++		short_pad = 1;
++
++	if (ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END) {
++		tail_skb = alloc_skb(ndp_align + ctx->max_ndp_size + short_pad,
++				     GFP_ATOMIC);
++		if (!tail_skb)
++			goto tail_alloc_failed;
++
++		if (ndp_align)
++			skb_put_zero(tail_skb, ndp_align);
++
++		if (ctx->is_ndp16) {
++			nth.nth16 = (struct usb_cdc_ncm_nth16 *)skb_out->data;
++			nth.nth16->wNdpIndex =
++				cpu_to_le16(skb_out->len + ndp_align);
++			skb_put_data(tail_skb, ctx->delayed_ndp16,
++				     ctx->max_ndp_size);
++		} else {
++			nth.nth32 = (struct usb_cdc_ncm_nth32 *)skb_out->data;
++			nth.nth32->dwNdpIndex =
++				cpu_to_le32(skb_out->len + ndp_align);
++			skb_put_data(tail_skb, ctx->delayed_ndp32,
++				     ctx->max_ndp_size);
++		}
++		cdc_ncm_sg_clear_delayed_ndp(ctx);
++
++		if (short_pad)
++			skb_put_u8(tail_skb, 0);
++
++		if (full_pad && full_pad <= PAGE_SIZE) {
++			get_page(cdc_ncm_zero_page);
++			skb_fill_page_desc(tail_skb, 0, cdc_ncm_zero_page, 0,
++					   full_pad);
++			tail_skb->len += full_pad;
++			tail_skb->data_len += full_pad;
++			full_pad = 0;
++		}
++
++		cdc_ncm_sg_chain_skb(ctx, skb_out, tail_skb,
++				     cdc_ncm_skb_sgs(tail_skb));
++	}
++
++	if (full_pad) {
++		if (cdc_ncm_sg_append_zero(ctx, skb_out, full_pad))
++			goto tail_alloc_failed;
++	} else if (short_pad && !(ctx->drvflags & CDC_NCM_FLAG_NDP_TO_END)) {
++		if (cdc_ncm_sg_append_zero(ctx, skb_out, 1))
++			goto tail_alloc_failed;
++	}
++
++	if (ctx->is_ndp16) {
++		nth.nth16 = (struct usb_cdc_ncm_nth16 *)skb_out->data;
++		nth.nth16->wBlockLength = cpu_to_le16(skb_out->len);
++	} else {
++		nth.nth32 = (struct usb_cdc_ncm_nth32 *)skb_out->data;
++		nth.nth32->dwBlockLength = cpu_to_le32(skb_out->len);
++	}
++
++	cdc_ncm_sg_reset(ctx);
++
++	ctx->tx_overhead += skb_out->len - ctx->tx_curr_frame_payload;
++	ctx->tx_ntbs++;
++	ctx->tx_sg_ntbs++;
++
++	usbnet_set_skb_tx_stats(skb_out, n,
++				(long)ctx->tx_curr_frame_payload - skb_out->len);
++
++	return skb_out;
++
++tail_alloc_failed:
++	cdc_ncm_sg_clear_delayed_ndp(ctx);
++	dev_kfree_skb_any(skb_out);
++	cdc_ncm_sg_reset(ctx);
++	ctx->tx_curr_frame_num = 0;
++	ctx->tx_curr_frame_payload = 0;
++	dev->net->stats.tx_dropped += n;
++	return NULL;
++
++alloc_failed:
++	if (skb) {
++		dev_kfree_skb_any(skb);
++		dev->net->stats.tx_dropped++;
++	}
++exit_no_skb:
++	if (ctx->tx_curr_skb && n > 0)
++		cdc_ncm_tx_timeout_start(ctx);
++	return NULL;
++}
++
+ struct sk_buff *
+ cdc_ncm_fill_tx_frame(struct usbnet *dev, struct sk_buff *skb, __le32 sign)
+ {
+@@ -1248,6 +1741,12 @@ cdc_ncm_fill_tx_frame(struct usbnet *dev
+ 		ready2send = 1;
+ 	}
+ 
++	if ((ctx->tx_curr_skb && ctx->tx_curr_sg) ||
++	    (!ctx->tx_curr_skb && READ_ONCE(tx_sg_zerocopy) &&
++	     cdc_ncm_zero_page && dev->can_dma_sg &&
++	     !cdc_ncm_comm_intf_is_mbim(ctx->control->cur_altsetting)))
++		return cdc_ncm_fill_tx_frame_sg(dev, skb, sign);
++
+ 	/* check if we are resuming an OUT skb */
+ 	skb_out = ctx->tx_curr_skb;
+ 
+@@ -1828,8 +2327,10 @@ next_ndp:
+ 
+ 		} else {
+ 			const u8 *pkt_ptr = skb_in->data + offset;
++			unsigned int thresh = READ_ONCE(rx_frag_thresh);
+ 
+-			if (skb_in->head_frag && !skb_is_nonlinear(skb_in) && len > 2048) {
++			if (skb_in->head_frag && !skb_is_nonlinear(skb_in) &&
++			    thresh >= 144 && len > thresh) {
+ 				struct page *head_page = virt_to_head_page(skb_in->head);
+ 				unsigned int headroom = 48 + NET_IP_ALIGN;
+ 				unsigned int frag_len = len - 128;
+@@ -2109,7 +2610,30 @@ static struct usb_driver cdc_ncm_driver
+ 	.disable_hub_initiated_lpm = 1,
+ };
+ 
+-module_usb_driver(cdc_ncm_driver);
++static int __init cdc_ncm_module_init(void)
++{
++	int ret;
++
++	cdc_ncm_zero_page = alloc_page(GFP_KERNEL | __GFP_ZERO);
++	ret = usb_register(&cdc_ncm_driver);
++	if (ret && cdc_ncm_zero_page) {
++		put_page(cdc_ncm_zero_page);
++		cdc_ncm_zero_page = NULL;
++	}
++
++	return ret;
++}
++module_init(cdc_ncm_module_init);
++
++static void __exit cdc_ncm_module_exit(void)
++{
++	usb_deregister(&cdc_ncm_driver);
++	if (cdc_ncm_zero_page) {
++		put_page(cdc_ncm_zero_page);
++		cdc_ncm_zero_page = NULL;
++	}
++}
++module_exit(cdc_ncm_module_exit);
+ 
+ MODULE_AUTHOR("Hans Petter Selasky");
+ MODULE_DESCRIPTION("USB CDC NCM host driver");
