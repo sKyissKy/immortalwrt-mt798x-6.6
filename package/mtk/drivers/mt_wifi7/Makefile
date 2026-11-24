@@ -3,14 +3,65 @@
 # This is free software, licensed under the GNU General Public License v2.
 # See /LICENSE for more information.
 
+# The order-only guard is not fail-closed under make -i. Refuse it before rules.mk
+# and package.mk can alter MAKEFLAGS or any package recipe can run.
+ifneq ($(origin MAKEFLAGS),file)
+  $(error Vendor Wi-Fi guarded packages reject explicit MAKEFLAGS overrides)
+endif
+ifneq ($(flavor MAKEFLAGS),recursive)
+  $(error Vendor Wi-Fi guarded packages reject immediate MAKEFLAGS assignments)
+endif
+ifneq ($(findstring i,$(filter-out --% %=%,$(firstword $(MAKEFLAGS)))),)
+  $(error Vendor Wi-Fi guarded packages refuse make -i/--ignore-errors)
+endif
+ifneq ($(filter --ignore-errors,$(MAKEFLAGS)),)
+  $(error Vendor Wi-Fi guarded packages refuse make -i/--ignore-errors)
+endif
+ifneq ($(origin CURDIR),file)
+  $(error mt_wifi7 requires CURDIR from GNU make)
+endif
+ifneq ($(origin USE_SOURCE_DIR),undefined)
+  $(error mt_wifi7 rejects USE_SOURCE_DIR before package.mk expansion)
+endif
+ifneq ($(origin USE_GIT_TREE),undefined)
+  $(error mt_wifi7 rejects USE_GIT_TREE before package.mk expansion)
+endif
+ifneq ($(origin USE_GIT_SRC_CHECKOUT),undefined)
+  $(error mt_wifi7 rejects USE_GIT_SRC_CHECKOUT before package.mk expansion)
+endif
+ifneq ($(origin KERNEL_BUILD_DIR),undefined)
+  ifneq ($(origin KERNEL_BUILD_DIR),file)
+    $(error Vendor Wi-Fi guarded packages require KERNEL_BUILD_DIR from the package build rules)
+  endif
+endif
+ifneq ($(origin BUILD_DIR_BASE),undefined)
+  $(error Vendor Wi-Fi guarded packages reject BUILD_DIR_BASE overrides)
+endif
+ifneq ($(origin BUILD_DIR),undefined)
+  $(error Vendor Wi-Fi guarded packages reject BUILD_DIR overrides)
+endif
+ifneq ($(origin PKG_NAME),undefined)
+  $(error mt_wifi7 rejects PKG_NAME overrides before package includes)
+endif
+ifneq ($(origin PKG_BUILD_DIR),undefined)
+  $(error mt_wifi7 rejects PKG_BUILD_DIR overrides before package includes)
+endif
+
 include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=mt_wifi7
+ifneq ($(origin PKG_NAME),file)
+  $(error mt_wifi7 rejects command-line/environment identity override)
+endif
 P4REV:=
 PKG_VERSION:=TEST
+PKG_RELEASE:=21
 PKG_SOURCE_URL:=
 PKG_BUILD_DIR:=$(KERNEL_BUILD_DIR)/$(PKG_NAME)
+ifneq ($(origin PKG_BUILD_DIR),file)
+  $(error mt_wifi7 rejects command-line/environment build path override)
+endif
 
 PKG_KCONFIG:= \
 	AP_SUPPORT \
@@ -295,7 +346,30 @@ PKG_CONFIG_DEPENDS:=$(foreach c, $(PKG_KCONFIG),$(if $(CONFIG_MTK_WIFI7_$c),CONF
 
 PKG_BUILD_PARALLEL:=1
 
+MTK_DEFAULT_EEPROM := $(CURDIR)/files/eeprom-default/bin/MT7991_MT7976_EEPROM_BE5040_iPAiLNA.bin
+MTK_DEFAULT_EEPROM_SHA256 := a500477cbe4a9dc6f3b4d672d58871859af0219d215670a8c7bbdcbf7072287b
+PKG_FILE_DEPENDS += $(MTK_DEFAULT_EEPROM)
+
 include $(INCLUDE_DIR)/package.mk
+
+define Build/Prepare
+	$(call Build/Prepare/Default)
+	test -f "$(MTK_DEFAULT_EEPROM)" || { echo "missing pinned default EEPROM: $(MTK_DEFAULT_EEPROM)" >&2; exit 1; }
+	eeprom_digest="$$$$($(MKHASH) sha256 "$(MTK_DEFAULT_EEPROM)")" && test "$$$$eeprom_digest" = "$(MTK_DEFAULT_EEPROM_SHA256)" || { echo "pinned default EEPROM source hash mismatch or mkhash failed" >&2; exit 1; }
+	$(INSTALL_DIR) "$(PKG_BUILD_DIR)/bin/mt7992/rebb"
+	$(CP) "$(MTK_DEFAULT_EEPROM)" "$(PKG_BUILD_DIR)/bin/mt7992/rebb/MT7991_MT7976_EEPROM_BE5040_iPAiLNA.bin"
+	eeprom_digest="$$$$($(MKHASH) sha256 "$(PKG_BUILD_DIR)/bin/mt7992/rebb/MT7991_MT7976_EEPROM_BE5040_iPAiLNA.bin")" && test "$$$$eeprom_digest" = "$(MTK_DEFAULT_EEPROM_SHA256)" || { echo "prepared default EEPROM hash mismatch or mkhash failed" >&2; exit 1; }
+endef
+
+
+# Validate the package source/build boundary before package.mk's prepared/clean rm -rf.
+override VENDOR_WIFI_GUARD := $(TOPDIR)/package/mtk/drivers/vendor-wifi-guard.sh
+override VENDOR_WIFI_SOURCE_DIR := $(CURDIR)/src
+.PHONY: vendor-wifi-predelete-guard
+vendor-wifi-predelete-guard:
+	@$(VENDOR_WIFI_GUARD) "$(TOPDIR)" "$(VENDOR_WIFI_SOURCE_DIR)" "$(KERNEL_BUILD_DIR)" "$(PKG_BUILD_DIR)" "mt_wifi7" "$(if $(filter-out undefined,$(origin USE_SOURCE_DIR)),active,)" "$(if $(filter-out undefined,$(origin USE_GIT_TREE)),active,)" "$(if $(filter-out undefined,$(origin USE_GIT_SRC_CHECKOUT)),active,)"
+STAMP_PREPARED_DEPENDS += | vendor-wifi-predelete-guard
+force-clean-build: vendor-wifi-predelete-guard
 
 
 TAR_CMD=$(HOST_TAR) -C $(1)/ $(TAR_OPTIONS)
@@ -305,7 +379,7 @@ BACKPORT_VERSION:=$(lastword $(subst /, , $(shell find $(KERNEL_BUILD_DIR) -type
 define KernelPackage/mt_wifi7
   CATEGORY:=MTK Properties
   TITLE:=MTK wifi7 AP driver
-  DEPENDS:=blkid +MTK_WIFI7_CFG80211_SUPPORT:kmod-cfg80211 +kmod-mt_wifi_cmn
+  DEPENDS:=+blkid +MTK_WIFI7_CFG80211_SUPPORT:kmod-cfg80211 +kmod-mt_wifi_cmn
 ifeq ($(CONFIG_MTK_CONNINFRA_APSOC),y)
   DEPENDS+=+kmod-conninfra
 endif
@@ -369,7 +443,7 @@ endif
 KCFLAGS += $(if $(CONFIG_MTK_WIFI7_OSAL_SUPPORT), -DMT_WIFI_COMMON_SUPPORT -DMT_WIFI_OSAL_SUPPORT -I$(STAGING_DIR)/usr/include/mt_wifi -I$(STAGING_DIR)/usr/include/mt_wifi/os)
 
 define Build/Compile
-	$(MAKE) $(PKG_JOBS) -C "$(LINUX_DIR)" V=1 \
+	+$(MAKE) $(PKG_JOBS) -C "$(LINUX_DIR)" V=1 \
 		$(KERNEL_MAKE_FLAGS) \
 		M="$(PKG_BUILD_DIR)/mt_wifi_ap" \
 		LINUX_DIR="$(KERNEL_BUILD_DIR)" \
