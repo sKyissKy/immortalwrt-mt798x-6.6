@@ -4,7 +4,7 @@ include $(TOPDIR)/rules.mk
 include $(INCLUDE_DIR)/kernel.mk
 
 PKG_NAME:=rtl8261d
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_SOURCE_PROTO:=git
 PKG_SOURCE_URL:=https://github.com/RuijieNetworksCommunity/rtl8261-phy-driver.git
@@ -17,14 +17,55 @@ PKG_LICENSE_FILES:=LICENSE
 PKG_MAINTAINER:=StarField Xu <air_jinkela@163.com>
 
 PKG_BUILD_PARALLEL:=1
+PKG_EXTMOD_SUBDIRS:=$(if $(filter backport,$(BUILD_VARIANT)),backport-src,src)
 
 include $(INCLUDE_DIR)/package.mk
 
 define KernelPackage/phy-rtl8261d
   SUBMENU:=Network Devices
-  TITLE:=Realtek RTL8261D 10 Gigabit PHY driver
+  TITLE:=Realtek RTL8261D 10 Gigabit PHY driver (Vendor legacy)
+  VARIANT:=legacy
+  DEFAULT_VARIANT:=1
   FILES:=$(PKG_BUILD_DIR)/src/rtl8261d.ko
   AUTOLOAD:=$(call AutoLoad,18,rtl8261d,1)
+endef
+
+define KernelPackage/phy-rtl8261d/description
+  Vendor legacy Realtek RTL8261D 10 Gigabit PHY driver with signed MDIO
+  error propagation, EDPD u16 tunable, config_intr, and hwmon fixes.
+endef
+
+define KernelPackage/phy-rtl8261d-backport
+  SUBMENU:=Network Devices
+  TITLE:=Realtek RTL8261C/CE/D 10GbE PHY driver (C45 backport)
+  VARIANT:=backport
+  DEPENDS:=@TARGET_mediatek +kmod-libphy +kmod-hwmon-core
+  CONFLICTS:=kmod-phy-rtl8261d
+  FILES:=$(PKG_BUILD_DIR)/backport-src/rtl8261d.ko
+  AUTOLOAD:=$(call AutoLoad,18,rtl8261d,1)
+endef
+
+define KernelPackage/phy-rtl8261d-backport/description
+  Clause-45 Realtek RTL8261C/CE/D 10GbE PHY driver backport with graceful
+  optional firmware loading, USXGMII/10GBASE-R rate matching and SerDes
+  resync, optional DT SerDes polarity inversion, hwmon, and PHY LEDs.
+endef
+
+ifeq ($(BUILD_VARIANT),backport)
+define Build/Prepare
+	mkdir -p $(PKG_BUILD_DIR)/backport-src
+	$(CP) ./backport-src/* $(PKG_BUILD_DIR)/backport-src/
+endef
+
+define Build/Compile
+	+$(KERNEL_MAKE) $(PKG_JOBS) \
+		M="$(PKG_BUILD_DIR)/backport-src" \
+		CONFIG_REALTEK_PHY_RTL8261D_BACKPORT=m \
+		modules
+endef
+else
+define Build/Prepare
+	$(call Build/Prepare/Default)
 endef
 
 define Build/Compile
@@ -33,5 +74,7 @@ define Build/Compile
 		CONFIG_REALTEK_PHY_RTL8261D=m \
 		modules
 endef
+endif
 
 $(eval $(call KernelPackage,phy-rtl8261d))
+$(eval $(call KernelPackage,phy-rtl8261d-backport))
