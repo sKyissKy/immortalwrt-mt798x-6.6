@@ -49,6 +49,13 @@ tplink,tl-7dr7299-v1)
 	ucidef_set_led_netdev "wan" "WAN" "green:status" "wan" "link tx rx"
 	ucidef_set_led_switch "10g-sfp" "10G SFP+" "green:10gsfp+" "switch0" "0x20"
 	;;
+tplink,tl-7dr7299-v1-dsa)
+	ucidef_set_led_netdev "ge1" "GE1" "mt7530-0:02:green:ge1" "lan1"
+	ucidef_set_led_netdev "ge2" "GE2" "mt7530-0:03:green:ge2" "lan2"
+	ucidef_set_led_netdev "10g-eth" "10G Ethernet" "mdio-bus:01:green:10ge" "eth1"
+	ucidef_set_led_netdev "wan" "WAN" "green:status" "wan" "link tx rx"
+	ucidef_set_led_netdev "10g-sfp" "10G SFP+" "green:10gsfp+" "lan7"
+	;;
 esac
 
 board_config_flush

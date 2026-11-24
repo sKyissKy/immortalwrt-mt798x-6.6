@@ -83,8 +83,9 @@ define Device/bananapi_bpi-r4-common
   DEVICE_DTS_LOADADDR := 0x45f00000
   DEVICE_DTS_OVERLAY:= mt7988a-bananapi-bpi-r4-emmc mt7988a-bananapi-bpi-r4-rtc mt7988a-bananapi-bpi-r4-sd mt7988a-bananapi-bpi-r4-wifi-mt7996a
   DEVICE_DTC_FLAGS := --pad 4096
-  DEVICE_PACKAGES := kmod-hwmon-pwmfan kmod-i2c-mux-pca954x kmod-eeprom-at24 kmod-mt7996-firmware kmod-mt7996-233-firmware \
-		     kmod-rtc-pcf8563 kmod-sfp kmod-usb3 e2fsprogs f2fsck mkf2fs mt7988-wo-firmware
+  DEVICE_PACKAGES := kmod-hwmon-pwmfan kmod-i2c-mux-pca954x kmod-eeprom-at24 \
+		     kmod-rtc-pcf8563 kmod-sfp kmod-usb3 e2fsprogs f2fsck mkf2fs mt7988-wo-firmware \
+		     cpufreq luci-app-cpufreq
   IMAGES := sysupgrade.itb
   KERNEL_LOADADDR := 0x46000000
   KERNEL_INITRAMFS_SUFFIX := -recovery.itb
@@ -308,10 +309,9 @@ define Device/tplink_tl-7dr7299-v1
   DEVICE_VARIANT := v1
   DEVICE_DTS := mt7988a-tplink-tl-7dr7299-v1
   DEVICE_DTS_DIR := ../dts
-  DEVICE_DTS_LOADADDR := 0x47f00000
   DEVICE_PACKAGES := \
-	mt798x-2p5g-phy-firmware-internal kmod-mt7992-firmware mt7988-wo-firmware kmod-mt798x-2p5g-phy kmod-phy-rtl8261d kmod-switch-rtl837x swconfig kmod-sfp kmod-usb3 automount wireless-regdb \
-	luci-app-mtwifi-cfg mtwifi-cfg luci-app-eqos-mtk luci-app-turboacc-mtk \
+	mt798x-2p5g-phy-firmware-internal mt7988-wo-firmware kmod-mt798x-2p5g-phy kmod-phy-rtl8261d kmod-switch-rtl837x swconfig kmod-sfp kmod-usb3 automount wireless-regdb \
+	luci-app-mtwifi-cfg mtwifi-cfg mtk-qos luci-app-mtk-qos luci-app-eqos-mtk luci-app-turboacc-mtk cpufreq luci-app-cpufreq \
 	kmod-mediatek_hnat kmod-warp kmod-mt_wifi_cmn kmod-mt_wifi7 kmod-mt_hwifi kmod-mtk_pci kmod-mtk_wed kmod-connac_if kmod-mt7992 kmod-mt799a \
 	kmod-gpio-button-hotplug kmod-leds-gpio luci-light \
 	kmod-crypto-hw-safexcel
@@ -330,3 +330,32 @@ define Device/tplink_tl-7dr7299-v1
 	fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-with-rootfs | pad-rootfs | append-metadata
 endef
 TARGET_DEVICES += tplink_tl-7dr7299-v1
+
+define Device/tplink_tl-7dr7299-v1-dsa
+  DEFAULT := n
+  DEVICE_VENDOR := TP-Link
+  DEVICE_MODEL := TL-7DR7299
+  DEVICE_VARIANT := v1-dsa
+  DEVICE_DTS := mt7988a-tplink-tl-7dr7299-v1-dsa
+  DEVICE_DTS_DIR := ../dts
+  DEVICE_PACKAGES := \
+	mt798x-2p5g-phy-firmware-internal mt7988-wo-firmware kmod-mt798x-2p5g-phy kmod-phy-rtl8261d-backport kmod-rtl8372n-dsa kmod-sfp kmod-usb3 automount wireless-regdb \
+	luci-app-mtwifi-cfg mtwifi-cfg mtk-qos luci-app-mtk-qos luci-app-eqos-mtk luci-app-turboacc-mtk cpufreq luci-app-cpufreq \
+	kmod-mediatek_hnat kmod-warp kmod-mt_wifi_cmn kmod-mt_wifi7 kmod-mt_hwifi kmod-mtk_pci kmod-mtk_wed kmod-connac_if kmod-mt7992 kmod-mt799a \
+	kmod-gpio-button-hotplug kmod-leds-gpio luci-light \
+	kmod-crypto-hw-safexcel
+  KERNEL_LOADADDR := 0x48000000
+  UBINIZE_OPTS := -E 5
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  KERNEL_IN_UBI := 1
+  UBOOTENV_IN_UBI := 1
+  IMAGES := sysupgrade.itb
+  KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+  KERNEL := kernel-bin | gzip
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 64k
+  IMAGE/sysupgrade.itb := append-kernel | \
+	fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-with-rootfs | pad-rootfs | append-metadata
+endef
+TARGET_DEVICES += tplink_tl-7dr7299-v1-dsa

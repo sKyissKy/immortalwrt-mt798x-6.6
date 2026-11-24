@@ -36,6 +36,7 @@ case "$board" in
 abt,asr3000|\
 cetron,ct3003-ubootmod|\
 cmcc,a10-ubootmod|\
+cudy,tr3000-v1-ubootmod|\
 h3c,magic-nx30-pro|\
 imou,lc-hx3001|\
 jcg,q30-pro|\
@@ -47,13 +48,18 @@ netis,nx31|\
 nokia,ea0326gmp|\
 qihoo,360t7|\
 routerich,ax3000-ubootmod|\
+tplink,tl-7dr7230-v1|\
+tplink,tl-7dr7230-v2|\
+tplink,tl-7dr7250-v1|\
 tplink,tl-xdr4288|\
 tplink,tl-xdr6086|\
 tplink,tl-xdr6088|\
 tplink,tl-xtr8488|\
 tplink,tl-7dr7230-rev1.0-sp2|\
 tplink,tl-7dr7299-v1|\
+tplink,tl-7dr7299-v1-dsa|\
 xiaomi,mi-router-ax3000t-ubootmod|\
+xiaomi,mi-router-wr30u-ubootmod|\
 xiaomi,redmi-router-ax6000-ubootmod|\
 zyxel,ex5601-t0-ubootmod)
 	ubootenv_add_ubi_default
@@ -62,6 +68,7 @@ acer,predator-w6|\
 acer,predator-w6d|\
 acer,vero-w6m|\
 glinet,gl-mt2500|\
+glinet,gl-mt2500-airoha|\
 glinet,gl-mt6000|\
 glinet,gl-x3000|\
 glinet,gl-xe3000|\
@@ -109,8 +116,7 @@ comfast,cf-e393ax)
 	ubootenv_add_uci_config "/dev/mtd1" "0x0" "0x20000" "0x80000"
 	;;
 cudy,tr3000-v1|\
-cudy,tr3000-v1-256mb|\
-cudy,tr3000-v1-ubootmod)
+cudy,tr3000-v1-256mb)
 	local envdev=/dev/mtd$(find_mtd_index "u-boot-env")
 	ubootenv_add_uci_config "$envdev" "0x0" "0x80000" "0x80000"
 	;;
@@ -153,7 +159,6 @@ ubnt,unifi-6-plus)
 	;;
 xiaomi,mi-router-ax3000t|\
 xiaomi,mi-router-wr30u-stock|\
-xiaomi,mi-router-wr30u-ubootmod|\
 xiaomi,redmi-router-ax6000-stock)
 	ubootenv_add_uci_config "/dev/mtd1" "0x0" "0x10000" "0x20000"
 	ubootenv_add_uci_sys_config "/dev/mtd2" "0x0" "0x10000" "0x20000"

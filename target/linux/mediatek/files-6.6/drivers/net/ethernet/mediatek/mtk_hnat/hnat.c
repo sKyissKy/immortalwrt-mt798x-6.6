@@ -244,6 +244,12 @@ int entry_delete_by_mac(u8 *mac)
 	struct foe_entry *entry = NULL;
 	int index, i, ret = 0;
 
+	if (!mac) {
+		if (debug_level >= 2)
+			pr_warn("%s: invalid mac address\n", __func__);
+		return 0;
+	}
+
 	for (i = 0; i < CFG_PPE_NUM; i++) {
 		entry = hnat_priv->foe_table_cpu[i];
 		for (index = 0; index < DEF_ETRY_NUM; entry++, index++) {
@@ -395,10 +401,13 @@ static int hnat_hw_init(u32 ppe_id)
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_TB_CFG, TCP_AGE, 1);
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_TB_CFG, UDP_AGE, 1);
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_TB_CFG, FIN_AGE, 1);
-	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BND_AGE_0, UDP_DLTA, 12);
+	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BND_AGE_0, UDP_DLTA,
+		     hnat_priv->udp_dlta);
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BND_AGE_0, NTU_DLTA, 1);
-	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BND_AGE_1, FIN_DLTA, 1);
-	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BND_AGE_1, TCP_DLTA, 7);
+	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BND_AGE_1, FIN_DLTA,
+		     hnat_priv->fin_dlta);
+	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BND_AGE_1, TCP_DLTA,
+		     hnat_priv->tcp_dlta);
 
 	/* setup FOE ka */
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_TB_CFG, KA_CFG, 0);
@@ -412,16 +421,21 @@ static int hnat_hw_init(u32 ppe_id)
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_TB_CFG, KA_CFG, 3);
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_TB_CFG, TICK_SEL, 0);
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_KA, KA_T, 1);
-	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_KA, TCP_KA, 1);
-	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_KA, UDP_KA, 1);
+	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_KA, TCP_KA,
+		     hnat_priv->tcp_ka);
+	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_KA, UDP_KA,
+		     hnat_priv->udp_ka);
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BIND_LMT_1, NTU_KA, 1);
 
 	/* setup FOE rate limit */
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BIND_LMT_0, QURT_LMT, 16383);
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BIND_LMT_0, HALF_LMT, 16383);
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BIND_LMT_1, FULL_LMT, 16383);
-	/* setup binding threshold as 30 packets per second */
-	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BNDR, BIND_RATE, 0x1E);
+	/* setup binding threshold */
+	if (hnat_priv->bind_threshold)
+		writel(hnat_priv->bind_threshold, hnat_priv->ppe_base[ppe_id] + PPE_BNDR);
+	else
+		cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_BNDR, BIND_RATE, hnat_priv->bind_rate);
 
 	/* setup FOE cf gen */
 	cr_set_field(hnat_priv->ppe_base[ppe_id] + PPE_GLO_CFG, PPE_EN, 1);
@@ -771,6 +785,13 @@ static int hnat_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	hnat_priv->foe_etry_num = DEF_ETRY_NUM;
+	hnat_priv->bind_threshold = 0;
+	hnat_priv->bind_rate = 0x1E;
+	hnat_priv->tcp_dlta = 7;
+	hnat_priv->udp_dlta = 12;
+	hnat_priv->fin_dlta = 1;
+	hnat_priv->tcp_ka = 1;
+	hnat_priv->udp_ka = 1;
 
 	match = of_match_device(of_hnat_match, &pdev->dev);
 	if (unlikely(!match))
