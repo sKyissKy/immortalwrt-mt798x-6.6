@@ -466,7 +466,7 @@
  		return -EOPNOTSUPP;
 --- a/drivers/net/ethernet/broadcom/genet/bcmgenet.h
 +++ b/drivers/net/ethernet/broadcom/genet/bcmgenet.h
-@@ -647,7 +647,7 @@ struct bcmgenet_priv {
+@@ -662,7 +662,7 @@ struct bcmgenet_priv {
  
  	struct bcmgenet_mib_counters mib;
  
@@ -474,7 +474,7 @@
 +	struct ethtool_keee eee;
  };
  
- #define GENET_IO_MACRO(name, offset)					\
+ static inline bool bcmgenet_has_40bits(struct bcmgenet_priv *priv)
 --- a/drivers/net/ethernet/broadcom/tg3.c
 +++ b/drivers/net/ethernet/broadcom/tg3.c
 @@ -2339,10 +2339,10 @@ static void tg3_phy_apply_otp(struct tg3

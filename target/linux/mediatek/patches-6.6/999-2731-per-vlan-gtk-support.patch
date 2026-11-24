@@ -10,7 +10,7 @@
 +extern void vlan_setup(struct net_device *dev);
  
  #else
- static inline struct net_device *
+ static inline bool is_vlan_dev(const struct net_device *dev)
 --- a/net/8021q/vlan.c
 +++ b/net/8021q/vlan.c
 @@ -125,6 +125,8 @@ void unregister_vlan_dev(struct net_devi

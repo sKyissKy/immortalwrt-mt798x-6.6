@@ -19,17 +19,6 @@ The RBUS Wi-Fi utility copies a constant pinctrl state name into a local
 buffer.  Use strscpy() with the destination buffer size so the compiler
 does not warn about using the source string size as the strncpy() bound.
 
---- a/drivers/net/ethernet/mediatek/mtk_eth_dbg.c
-+++ b/drivers/net/ethernet/mediatek/mtk_eth_dbg.c
-@@ -69,7 +69,7 @@ static int qdma_pppq_show(struct seq_fil
- 	int i;
- 
- 	seq_puts(m, "Usage of the QDMA PPPQ for the HW path:\n");
--	for (i = 0; i < 64; i++)
-+	for (i = 0; i < MTK_QDMA_NUM_QUEUES; i++)
- 		seq_printf(m, "qdma_txq%d:	%5d Mbps %8d refcnt\n",
- 			   i, eth->qdma_shaper.speed[i],
- 			   atomic_read(&eth->qdma_shaper.refcnt[i]));
 --- a/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
 +++ b/drivers/net/ethernet/mediatek/mtk_hnat/hnat_nf_hook.c
 @@ -25,6 +25,7 @@
